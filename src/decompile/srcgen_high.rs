@@ -1,9 +1,8 @@
 use anyhow::Result;
-use std::collections::{HashMap, HashSet, BTreeMap};
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
 use crate::{Tjs2File, Tjs2Object};
-use crate::Variant;
 
 use super::cfg::Cfg;
 use super::expr::{BinOp, Expr, UnOp};
@@ -20,14 +19,14 @@ fn vm_binop(op: &str) -> Option<BinOp> {
 
         "VM_SAL" | "SHL" => Some(BinOp::Shl),
         "VM_SAR" | "SHR" => Some(BinOp::Shr),
-        "VM_SR"  | "USHR" => Some(BinOp::UShr),
+        "VM_SR" | "USHR" => Some(BinOp::UShr),
 
         "VM_BAND" | "BAND" => Some(BinOp::BitAnd),
         "VM_BXOR" | "BXOR" => Some(BinOp::BitXor),
-        "VM_BOR"  | "BOR"  => Some(BinOp::BitOr),
+        "VM_BOR" | "BOR" => Some(BinOp::BitOr),
 
         "VM_LAND" | "LAND" => Some(BinOp::LogAnd),
-        "VM_LOR"  | "LOR"  => Some(BinOp::LogOr),
+        "VM_LOR" | "LOR" => Some(BinOp::LogOr),
 
         "VM_EQ" | "EQ" => Some(BinOp::Eq),
         "VM_NE" | "NE" => Some(BinOp::Ne),
@@ -55,7 +54,6 @@ fn vm_unop(op: &str) -> Option<UnOp> {
         _ => None,
     }
 }
-
 
 fn fmt_octet_literal(bytes: &[u8]) -> String {
     // B: official usage style
@@ -87,7 +85,6 @@ fn escape_tjs_string_min(s: &str) -> String {
     out
 }
 
-
 /// Options controlling how code is emitted.
 pub struct SrcgenOptions {
     pub inline: bool,
@@ -99,14 +96,54 @@ impl Default for SrcgenOptions {
     }
 }
 
-fn split_class_method(name: &str) -> Option<(&str, &str)> {
-    let (a, b) = name.split_once('.')?;
-    if a.is_empty() || b.is_empty() { return None; }
-    if !a.split('.').all(is_identifier) { return None; }
-    if !b.split('.').all(is_identifier) { return None; }
-    Some((a, b))
+/// Returns true if obj or any of its ancestors (via parent chain) is a class (context_type=6),
+/// stopping at context_type=0 (global). Used to decide if `%-2` (scope) maps to `this`.
+fn scope_is_class(file: &Tjs2File, obj: &Tjs2Object) -> bool {
+    let mut cur = obj.parent;
+    loop {
+        if cur < 0 || cur as usize >= file.objects.len() {
+            return false;
+        }
+        let p = &file.objects[cur as usize];
+        match p.context_type {
+            0 => return false,
+            6 => return true,
+            _ => cur = p.parent,
+        }
+    }
 }
 
+/// Build a fmt_var closure appropriate for the given object's context.
+/// - r >= 0: r{r}_{ver}
+/// - r == -1: "this"
+/// - r == -2: "this" if in a class scope, else "global"
+/// - r <= -3 and frame_idx < arg_count: "a{frame_idx}" (declared parameter)
+/// - r <= -3 and frame_idx >= arg_count: "_fr{frame_idx - arg_count}" (local frame slot)
+fn make_fmt_var(in_class: bool, arg_count: usize) -> impl Fn(VarId) -> String {
+    move |vid: VarId| -> String {
+        match vid.var {
+            Var::Reg(r) if r >= 0 => format!("r{}_{}", r, vid.ver),
+            Var::Reg(-1) => "this".to_string(),
+            Var::Reg(-2) => {
+                if in_class {
+                    "this".to_string()
+                } else {
+                    "global".to_string()
+                }
+            }
+            Var::Reg(r) => {
+                let frame_idx = (-3 - r) as usize;
+                if frame_idx < arg_count {
+                    format!("a{}", frame_idx)
+                } else {
+                    format!("_fr{}", frame_idx - arg_count)
+                }
+            }
+            Var::Flag => format!("flag_{}", vid.ver),
+            Var::Exception => format!("exc_{}", vid.ver),
+        }
+    }
+}
 
 // pub fn dump_src_file(file: &Tjs2File, _opt: SrcgenOptions) -> Result<String> {
 //     let mut out = String::new();
@@ -163,8 +200,22 @@ fn split_class_method(name: &str) -> Option<(&str, &str)> {
 // }
 
 fn const_propagate_intrablock(prog: &mut ExprProgram) {
+    // In TJS2, the initial value (ver=0) of all non-negative local registers is void.
+    // Register 0 (result register) is most commonly seen as "void" when used as a store value.
+    let initial_void: HashMap<VarId, Expr> = {
+        let mut m = HashMap::new();
+        m.insert(
+            VarId {
+                var: Var::Reg(0),
+                ver: 0,
+            },
+            Expr::Void,
+        );
+        m
+    };
+
     for b in &mut prog.blocks {
-        let mut env: HashMap<VarId, Expr> = HashMap::new();
+        let mut env: HashMap<VarId, Expr> = initial_void.clone();
 
         for st in &mut b.stmts {
             // 1) rewrite uses in this statement
@@ -191,10 +242,20 @@ fn const_propagate_intrablock(prog: &mut ExprProgram) {
 fn rewrite_stmt(st: &mut Stmt, env: &HashMap<VarId, Expr>) {
     match st {
         Stmt::Assign { expr, .. } => rewrite_expr(expr, env),
-        Stmt::Opaque { args, .. } => {
-            for a in args { rewrite_expr(a, env); }
+        Stmt::Store { target, value } => {
+            rewrite_expr(target, env);
+            rewrite_expr(value, env);
         }
-        _ => {}
+        Stmt::Update { target, rhs, .. } => {
+            rewrite_expr(target, env);
+            rewrite_expr(rhs, env);
+        }
+        Stmt::Expr(e) => rewrite_expr(e, env),
+        Stmt::Opaque { args, .. } => {
+            for a in args {
+                rewrite_expr(a, env);
+            }
+        }
     }
 }
 
@@ -206,16 +267,37 @@ fn rewrite_expr(e: &mut Expr, env: &HashMap<VarId, Expr>) {
             }
         }
         Expr::Unary(_, expr) => rewrite_expr(expr, env),
-        Expr::Binary(_, lhs, rhs) => { rewrite_expr(lhs, env); rewrite_expr(rhs, env); }
-        Expr::Member(base, _) => rewrite_expr(base, env),
-        Expr::Index(base, index) => { rewrite_expr(base, env); rewrite_expr(index, env); }
+        Expr::Binary(_, lhs, rhs) => {
+            rewrite_expr(lhs, env);
+            rewrite_expr(rhs, env);
+        }
+        Expr::Member(base, _) | Expr::Deref(base) => rewrite_expr(base, env),
+        Expr::Index(base, index) => {
+            rewrite_expr(base, env);
+            rewrite_expr(index, env);
+        }
         Expr::Call(callee, args) => {
             rewrite_expr(callee, env);
-            for a in args { rewrite_expr(a, env); }
+            for a in args {
+                rewrite_expr(a, env);
+            }
         }
         Expr::New(ctor, args) => {
             rewrite_expr(ctor, env);
-            for a in args { rewrite_expr(a, env); }
+            for a in args {
+                rewrite_expr(a, env);
+            }
+        }
+        Expr::MethodCall { base, args, .. } => {
+            rewrite_expr(base, env);
+            for a in args {
+                rewrite_expr(a, env);
+            }
+        }
+        Expr::Opaque(_, args) => {
+            for a in args {
+                rewrite_expr(a, env);
+            }
         }
         _ => {}
     }
@@ -229,7 +311,13 @@ fn prop_value(rhs: &Expr, env: &HashMap<VarId, Expr>) -> Option<Expr> {
 
     match &v {
         // literals
-        Expr::Void | Expr::Null | Expr::Bool(_) | Expr::Int(_) | Expr::Real(_) | Expr::Str(_) | Expr::Octet(_) => Some(v),
+        Expr::Void
+        | Expr::Null
+        | Expr::Bool(_)
+        | Expr::Int(_)
+        | Expr::Real(_)
+        | Expr::Str(_)
+        | Expr::Octet(_) => Some(v),
 
         // alias
         Expr::SsaVar(_) => Some(v),
@@ -238,8 +326,13 @@ fn prop_value(rhs: &Expr, env: &HashMap<VarId, Expr>) -> Option<Expr> {
         Expr::Member(base, name) => {
             let ok = matches!(
                 **base,
-                Expr::SsaVar(VarId { var: Var::Reg(-2), .. }) 
-                    | Expr::SsaVar(VarId { var: Var::Reg(-1), .. }) // this
+                Expr::SsaVar(VarId {
+                    var: Var::Reg(-2),
+                    ..
+                }) | Expr::SsaVar(VarId {
+                    var: Var::Reg(-1),
+                    ..
+                }) // this
             ) || is_identifier(name);
             if ok { Some(v) } else { None }
         }
@@ -249,234 +342,446 @@ fn prop_value(rhs: &Expr, env: &HashMap<VarId, Expr>) -> Option<Expr> {
 }
 
 fn emit_object_body(obj: &Tjs2Object, file: &Tjs2File, indent: usize) -> Result<(String, String)> {
-    // let lhs = obj_lhs(obj.index, obj.name.as_deref());
-    // writeln!(out, "{} = function() {{", lhs)?;
     let mut out = String::new();
 
     let cfg = Cfg::build(obj)?;
     let ssa = SsaProgram::from_cfg(&cfg)?;
     let mut prog = ExprProgram::from_ssa(file, obj, &ssa)?;
     const_propagate_intrablock(&mut prog);
-    let arg_regs = infer_arg_regs(&prog); 
-    let params = arg_regs.iter().map(|&r| arg_name_for_reg(r)).collect::<Vec<_>>().join(", ");
 
-    let fmt_var = |vid: VarId| -> String { fmt_vid_tjs(vid) };
-    emit_var_decls(&mut out, &prog, &fmt_var)?;
+    let params = build_params(obj);
+    let arg_count = obj.func_decl_arg_count.max(0) as usize;
 
-    // Recover return expressions from SSA (expr_build's Terminator::Ret has no expr).
+    let in_class = scope_is_class(file, obj);
+    let fmt_var = make_fmt_var(in_class, arg_count);
+
+    // Recover return value from SSA: find the SRV source (it writes to r0 conceptually).
+    // We special-case: for SRV opaque stmts, propagate the arg into a synthetic ret_expr.
     let mut ret_expr: Vec<Option<Expr>> = vec![None; prog.blocks.len()];
     for b in &ssa.blocks {
-        if let Some(last) = b.insns.last() {
-            // VM_RET has the return value in uses[0] (static, no guessing).
-            if last.mnemonic.eq_ignore_ascii_case("RET") || last.mnemonic.eq_ignore_ascii_case("VM_RET") {
-                if let Some(v) = last.uses.get(0).copied() {
-                    ret_expr[b.id] = Some(Expr::SsaVar(v));
+        // Find the last SRV instruction in this block and use its source as ret_expr.
+        let srv = b.insns.iter().rev().find(|i| {
+            i.mnemonic.eq_ignore_ascii_case("SRV") || i.mnemonic.eq_ignore_ascii_case("VM_SRV")
+        });
+        if let Some(si) = srv {
+            if let Some(v) = si.uses.get(0).copied() {
+                ret_expr[b.id] = Some(Expr::SsaVar(v));
+            }
+        }
+    }
+    propagate_into_ret_expr(&mut ret_expr, &prog);
+    remove_dead_phis(&mut prog, &ret_expr);
+    remove_dead_assigns(&mut prog, &ret_expr);
+
+    emit_var_decls(&mut out, &prog, &fmt_var, arg_count, indent)?;
+
+    let mut s = Structurer::new(&cfg, &prog, &fmt_var, ret_expr);
+    let lines = s.emit_function_body(prog.entry_block, indent);
+
+    for l in lines {
+        writeln!(out, "{}", l)?;
+    }
+    Ok((out, params))
+}
+
+/// Build param string from func_decl_arg_count (authoritative — always trust it).
+fn build_params(obj: &Tjs2Object) -> String {
+    let n = obj.func_decl_arg_count.max(0) as usize;
+    (0..n)
+        .map(|i| format!("a{}", i))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Propagate constant assignments into ret_expr for each block.
+fn propagate_into_ret_expr(ret_expr: &mut Vec<Option<Expr>>, prog: &ExprProgram) {
+    for b in &prog.blocks {
+        let Some(re) = ret_expr.get_mut(b.id) else {
+            continue;
+        };
+        let Some(e) = re else {
+            continue;
+        };
+        let mut env: HashMap<VarId, Expr> = HashMap::new();
+        for st in &b.stmts {
+            match st {
+                Stmt::Assign { dst, expr } => {
+                    let mut v = expr.clone();
+                    rewrite_expr(&mut v, &env);
+                    if let Some(pv) = prop_value(&v, &env) {
+                        env.insert(*dst, pv);
+                    }
+                }
+                Stmt::Opaque { op, args, defs }
+                    if (op.eq_ignore_ascii_case("VM_SRV") || op.eq_ignore_ascii_case("SRV"))
+                        && !args.is_empty()
+                        && !defs.is_empty() =>
+                {
+                    let mut v = args[0].clone();
+                    rewrite_expr(&mut v, &env);
+                    if let Some(pv) = prop_value(&v, &env) {
+                        env.insert(defs[0], pv);
+                    }
+                }
+                _ => {}
+            }
+        }
+        rewrite_expr(e, &env);
+    }
+}
+
+/// Eliminate phi nodes whose results are never truly used (i.e. only consumed by other dead
+/// phis or by edge copies that feed dead phis).  After this pass, `build_edge_copies` will
+/// not emit the now-removed phi copies, and a subsequent `remove_dead_assigns` will clean up
+/// any statements that only computed values for those dead phi args.
+fn remove_dead_phis(prog: &mut ExprProgram, ret_expr: &[Option<Expr>]) {
+    // Phase 1 – seed: vars used in stmts / terminators / ret_expr (NOT phi args yet).
+    let mut live: HashSet<VarId> = HashSet::new();
+    for b in &prog.blocks {
+        for st in &b.stmts {
+            collect_uses_stmt(st, &mut live);
+        }
+        collect_vars_term(&b.term, &mut live);
+    }
+    for re in ret_expr {
+        if let Some(e) = re {
+            collect_vars_expr(e, &mut live);
+        }
+    }
+
+    // Phase 2 – propagate: if a phi result is live, its args become live.
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for b in &prog.blocks {
+            for phi in &b.phi {
+                if live.contains(&phi.result) {
+                    for (_, v) in &phi.args {
+                        if live.insert(*v) {
+                            changed = true;
+                        }
+                    }
                 }
             }
         }
     }
 
-    let mut s = Structurer::new(&cfg, &prog, &fmt_var, ret_expr);
-    let lines = s.emit_function_body(prog.entry_block, 2);
-
-    for l in lines {
-        writeln!(out, "{}", l)?;
+    // Phase 3 – prune: drop every phi whose result is not in the live set.
+    for b in &mut prog.blocks {
+        b.phi.retain(|phi| live.contains(&phi.result));
     }
-    // writeln!(out, "}};\n")?;
-    Ok((out, params))
 }
 
-fn find_class_object<'a>(file: &'a Tjs2File, cls: &str) -> Option<&'a Tjs2Object> {
-    file.objects.iter().find(|o| o.name.as_deref() == Some(cls))
+/// Remove Assign statements whose dst is never referenced anywhere after constant propagation.
+fn remove_dead_assigns(prog: &mut ExprProgram, ret_expr: &[Option<Expr>]) {
+    let mut used: HashSet<VarId> = HashSet::new();
+    for b in &prog.blocks {
+        for phi in &b.phi {
+            for (_, v) in &phi.args {
+                used.insert(*v);
+            }
+        }
+        for st in &b.stmts {
+            collect_uses_stmt(st, &mut used); // only RHS / side-effect reads, not dsts
+        }
+        collect_vars_term(&b.term, &mut used);
+    }
+    for re in ret_expr {
+        if let Some(e) = re {
+            collect_vars_expr(e, &mut used);
+        }
+    }
+
+    let mut dead_dsts: HashSet<VarId> = HashSet::new();
+    for b in &prog.blocks {
+        for st in &b.stmts {
+            if let Stmt::Assign { dst, .. } = st {
+                if !used.contains(dst) {
+                    dead_dsts.insert(*dst);
+                }
+            }
+        }
+    }
+    for b in &mut prog.blocks {
+        b.stmts
+            .retain(|st| !matches!(st, Stmt::Assign { dst, .. } if dead_dsts.contains(dst)));
+    }
+}
+
+/// Collect only the "use" side of a statement (not defs of Assign).
+fn collect_uses_stmt(st: &Stmt, s: &mut HashSet<VarId>) {
+    match st {
+        Stmt::Assign { expr, .. } => collect_vars_expr(expr, s), // dst is a def, skip it
+        Stmt::Store { target, value } => {
+            collect_vars_expr(target, s);
+            collect_vars_expr(value, s);
+        }
+        Stmt::Update {
+            dst, target, rhs, ..
+        } => {
+            if let Some(d) = dst {
+                s.insert(*d); // the update result is a use-def; still mark it used
+            }
+            collect_vars_expr(target, s);
+            collect_vars_expr(rhs, s);
+        }
+        Stmt::Expr(e) => collect_vars_expr(e, s),
+        Stmt::Opaque { args, defs, .. } => {
+            for d in defs {
+                s.insert(*d);
+            }
+            for a in args {
+                collect_vars_expr(a, s);
+            }
+        }
+    }
 }
 
 fn infer_single_return_expr(file: &Tjs2File, getter_obj: &Tjs2Object) -> Option<String> {
     let cfg = Cfg::build(getter_obj).ok()?;
     let ssa = SsaProgram::from_cfg(&cfg).ok()?;
-    let prog = ExprProgram::from_ssa(file, getter_obj, &ssa).ok()?;
+    let mut prog = ExprProgram::from_ssa(file, getter_obj, &ssa).ok()?;
+    const_propagate_intrablock(&mut prog);
 
-    let fmt_var = |vid: VarId| -> String {
-        match vid.var {
-            Var::Reg(r) if r <= -3 => format!("a{}", (-3 - r) as i32),
-            Var::Reg(-2) => "global".to_string(),
-            Var::Reg(-1) => "this".to_string(),
-            _ => fmt_vid_tjs(vid),
-        }
-    };
+    let in_class = scope_is_class(file, getter_obj);
+    let arg_count = getter_obj.func_decl_arg_count.max(0) as usize;
+    let fmt_var = make_fmt_var(in_class, arg_count);
 
-    let mut ret: Option<Expr> = None;
+    // Collect SRV return expressions
+    let mut ret_expr: Vec<Option<Expr>> = vec![None; prog.blocks.len()];
     for b in &ssa.blocks {
-        if let Some(last) = b.insns.last() {
-            if last.mnemonic.eq_ignore_ascii_case("RET") || last.mnemonic.eq_ignore_ascii_case("VM_RET") {
-                if let Some(v) = last.uses.get(0).copied() {
-                    let e = Expr::SsaVar(v);
-                    if let Some(prev) = &ret {
-                        if prev.to_tjs_with(&fmt_var) != e.to_tjs_with(&fmt_var) {
-                            return None;
-                        }
-                    }
-                    ret = Some(e);
-                }
+        let srv = b.insns.iter().rev().find(|i| {
+            i.mnemonic.eq_ignore_ascii_case("SRV") || i.mnemonic.eq_ignore_ascii_case("VM_SRV")
+        });
+        if let Some(si) = srv {
+            if let Some(v) = si.uses.get(0).copied() {
+                ret_expr[b.id] = Some(Expr::SsaVar(v));
             }
         }
     }
+    propagate_into_ret_expr(&mut ret_expr, &prog);
 
-    ret.map(|e| e.to_tjs_with(&fmt_var))
+    let mut unique_ret: Option<String> = None;
+    for re in &ret_expr {
+        if let Some(e) = re {
+            let s = e.to_tjs_with(&fmt_var);
+            if let Some(prev) = &unique_ret {
+                if *prev != s {
+                    return None;
+                }
+            } else {
+                unique_ret = Some(s);
+            }
+        }
+    }
+    unique_ret
 }
 
 pub fn dump_src_file(file: &Tjs2File) -> Result<String> {
-    use std::collections::{BTreeMap, BTreeSet};
-
     let mut out = String::new();
     writeln!(out, "// Decompiled by tjs2Decompiler (high)")?;
-    writeln!(out, "// objects={}, toplevel={}", file.objects.len(), file.toplevel)?;
+    writeln!(
+        out,
+        "// objects={}, toplevel={}",
+        file.objects.len(),
+        file.toplevel
+    )?;
     writeln!(out)?;
 
     let toplevel = file.toplevel.max(0) as usize;
 
-    // owner_idx -> ordered members (name, obj_idx)
-    let mut owner_members: BTreeMap<usize, Vec<(String, usize)>> = BTreeMap::new();
-    let mut member_obj: BTreeSet<usize> = BTreeSet::new();
-    for owner in &file.objects {
-        let oidx = owner.index;
-        if owner.properties.is_empty() {
-            continue;
-        }
-        let ent = owner_members.entry(oidx).or_default();
-        for (mname, midx) in &owner.properties {
-            if *midx < 0 {
-                continue;
-            }
-            let mi = *midx as usize;
-            if mi >= file.objects.len() {
-                continue;
-            }
-            let mname = file.const_pools.strings.get(*mname as usize).ok_or_else(|| anyhow::anyhow!("invalid string pool index"))?;
-            ent.push((mname.clone(), mi));
-            member_obj.insert(mi);
+    // Build parent -> children index (ordered by object index)
+    let mut children_of: HashMap<usize, Vec<usize>> = HashMap::new();
+    for obj in &file.objects {
+        if obj.parent >= 0 {
+            children_of
+                .entry(obj.parent as usize)
+                .or_default()
+                .push(obj.index);
         }
     }
 
-    let mut class_owners: Vec<usize> = Vec::new();
-    for (&oidx, mems) in &owner_members {
-        if oidx == toplevel {
-            continue;
-        }
-        let o = &file.objects[oidx];
-        let Some(nm) = o.name.as_deref() else { continue; };
-        if !is_identifier(nm) {
-            continue;
-        }
-        let looks_like_class = mems.iter().any(|(_, mi)| {
-            let mo = &file.objects[*mi];
-            !mo.code.is_empty() || mo.prop_getter >= 0 || mo.prop_setter >= 0
-        });
-        if looks_like_class {
-            class_owners.push(oidx);
-        }
-    }
+    // Track emitted objects to avoid duplication
+    let mut emitted: HashSet<usize> = HashSet::new();
+    emitted.insert(toplevel);
 
-    // === Emit classes ===
-    let mut emitted: Vec<bool> = vec![false; file.objects.len()];
-    if toplevel < emitted.len() {
-        emitted[toplevel] = true;
-    }
+    // === Emit classes: context_type==6 with parent==toplevel ===
+    let classes: Vec<usize> = file
+        .objects
+        .iter()
+        .filter(|o| o.context_type == 6 && o.parent == toplevel as i32)
+        .map(|o| o.index)
+        .collect();
 
-    for oidx in class_owners {
-        let cls_obj = &file.objects[oidx];
-        let cls_name = cls_obj.name.as_deref().unwrap();
+    for cls_idx in classes {
+        let cls_obj = &file.objects[cls_idx];
+        let cls_name = match cls_obj.name.as_deref() {
+            Some(n) if is_identifier(n) => n.to_string(),
+            _ => format!("__class_{}", cls_idx),
+        };
 
+        emitted.insert(cls_idx);
 
-        // writeln!(out, "class {} {{", cls_name)?;
-        let mut extends: Option<String> = None;
-        if let Some(cls_obj) = find_class_object(file, cls_name) {
-            if cls_obj.super_class_getter >= 0 {
-                let gi = cls_obj.super_class_getter as usize;
-                if gi < file.objects.len() {
-                    extends = infer_single_return_expr(file, &file.objects[gi]);
-                }
+        // extends: use super_class_getter field, or find context_type==7 child
+        let extends = if cls_obj.super_class_getter >= 0 {
+            let sg = cls_obj.super_class_getter as usize;
+            if sg < file.objects.len() {
+                emitted.insert(sg);
+                infer_single_return_expr(file, &file.objects[sg])
+            } else {
+                None
             }
-        }
+        } else {
+            // fallback: look for context_type==7 child
+            children_of
+                .get(&cls_idx)
+                .and_then(|ch| ch.iter().find(|&&ci| file.objects[ci].context_type == 7))
+                .and_then(|&ci| {
+                    emitted.insert(ci);
+                    infer_single_return_expr(file, &file.objects[ci])
+                })
+        };
 
-        match extends {
+        match &extends {
             Some(e) => writeln!(out, "class {} extends {} {{", cls_name, e)?,
             None => writeln!(out, "class {} {{", cls_name)?,
         }
 
-        if let Some(mems) = owner_members.get(&oidx) {
-            for (mname, midx) in mems {
-                let mobj = &file.objects[*midx];
+        let empty_children: Vec<usize> = Vec::new();
+        let children = children_of.get(&cls_idx).unwrap_or(&empty_children).clone();
 
-                if mobj.prop_getter >= 0 || mobj.prop_setter >= 0 {
-                    writeln!(out, "  property {} {{", mname)?;
+        let mut first_member = true;
+        for ci in &children {
+            if emitted.contains(ci) {
+                continue;
+            }
+            let mobj = &file.objects[*ci];
+            match mobj.context_type {
+                7 => {
+                    emitted.insert(*ci);
+                } // superclass getter already handled
+                2 => {
+                    emitted.insert(*ci);
+                } // anonymous closure – skip top-level
+                3 => {
+                    // Property object
+                    emitted.insert(*ci);
+                    let prop_name = match mobj.name.as_deref() {
+                        Some(n) if n != "(anonymous)" && is_identifier(n) => n.to_string(),
+                        _ => format!("__prop_{}", ci),
+                    };
+                    if !first_member {
+                        writeln!(out)?;
+                    }
+                    first_member = false;
+                    writeln!(out, "  property {} {{", prop_name)?;
+
                     if mobj.prop_getter >= 0 {
                         let gi = mobj.prop_getter as usize;
-                        if gi < file.objects.len() {
+                        if gi < file.objects.len() && !emitted.contains(&gi) {
+                            // body indent=6: class(2) + property(2) + getter(2)
                             let (body, _params) = emit_object_body(&file.objects[gi], file, 6)?;
                             writeln!(out, "    getter() {{")?;
                             write!(out, "{body}")?;
                             writeln!(out, "    }}")?;
+                            emitted.insert(gi);
                         }
                     }
                     if mobj.prop_setter >= 0 {
                         let si = mobj.prop_setter as usize;
-                        if si < file.objects.len() {
+                        if si < file.objects.len() && !emitted.contains(&si) {
+                            // body indent=6: class(2) + property(2) + setter(2)
                             let (body, params) = emit_object_body(&file.objects[si], file, 6)?;
-                            let args = params;
-                            writeln!(out, "    setter({}) {{", args)?;
+                            writeln!(out, "    setter({}) {{", params)?;
                             write!(out, "{body}")?;
                             writeln!(out, "    }}")?;
+                            emitted.insert(si);
                         }
                     }
-                    writeln!(out, "  }}")?;
-                    emitted[*midx] = true;
-                    continue;
-                }
 
-                // method/function object
-                if !mobj.code.is_empty() {
-                    let (body, params) = emit_object_body(mobj, file, 6)?;
-                    let args = params;
-                    writeln!(out, "  function {}({}) {{", mname, args)?;
-                    write!(out, "{body}")?;
-                    writeln!(out, "  }}")?;
-                    emitted[*midx] = true;
-                    continue;
-                }
+                    // Mark any context_type==5 (getter) children of the property object
+                    if let Some(prop_children) = children_of.get(ci) {
+                        for &pci in prop_children {
+                            emitted.insert(pci);
+                        }
+                    }
 
-                // fallback: member exists but no code (field)
-                writeln!(out, "  var {};", mname)?;
-                emitted[*midx] = true;
+                    writeln!(out, "  }}")?;
+                }
+                1 => {
+                    // Method
+                    let mname = match mobj.name.as_deref() {
+                        Some(n) if n != "(anonymous)" && is_identifier(n) => n.to_string(),
+                        _ => format!("__method_{}", ci),
+                    };
+                    emitted.insert(*ci);
+                    // Mark anonymous children (closures inside this method)
+                    if let Some(mch) = children_of.get(ci) {
+                        for &mci in mch {
+                            if file.objects[mci].context_type == 2 {
+                                emitted.insert(mci);
+                            }
+                        }
+                    }
+
+                    if !first_member {
+                        writeln!(out)?;
+                    }
+                    first_member = false;
+
+                    if mobj.code.is_empty() {
+                        writeln!(out, "  function {}() {{}}", mname)?;
+                    } else {
+                        // body indent=4: class(2) + method(2)
+                        let (body, params) = emit_object_body(mobj, file, 4)?;
+                        writeln!(out, "  function {}({}) {{", mname, params)?;
+                        write!(out, "{body}")?;
+                        writeln!(out, "  }}")?;
+                    }
+                }
+                _ => {
+                    emitted.insert(*ci);
+                }
             }
         }
 
         writeln!(out, "}}")?;
         writeln!(out)?;
-        emitted[oidx] = true;
     }
 
-    // === Emit remaining top-level functions (not class members) ===
+    // === Emit top-level functions: context_type==1 with parent==toplevel ===
     for obj in &file.objects {
-        let idx = obj.index;
-        if idx == toplevel {
+        if emitted.contains(&obj.index) {
             continue;
         }
-        if idx < emitted.len() && emitted[idx] {
+        if obj.parent != toplevel as i32 {
             continue;
         }
-        if member_obj.contains(&idx) {
+        if obj.context_type != 1 {
             continue;
         }
-
         if obj.code.is_empty() {
             continue;
         }
 
-        let default_name = format!("__obj_{}", idx);
-        let name = obj.name.as_deref().unwrap_or(&default_name);
-        let (body, params) = emit_object_body(obj, file, 6)?;
-        let args = params;
-        writeln!(out, "function {}({}) {{", name, args)?;
+        let name = match obj.name.as_deref() {
+            Some(n) if n != "(anonymous)" && is_identifier(n) => n.to_string(),
+            _ => format!("__func_{}", obj.index),
+        };
+        emitted.insert(obj.index);
+
+        // Mark anonymous closure children
+        if let Some(ch) = children_of.get(&obj.index) {
+            for &ci in ch {
+                if file.objects[ci].context_type == 2 {
+                    emitted.insert(ci);
+                }
+            }
+        }
+
+        // body indent=2: top-level function body is one level deep
+        let (body, params) = emit_object_body(obj, file, 2)?;
+        writeln!(out, "function {}({}) {{", name, params)?;
         write!(out, "{body}")?;
         writeln!(out, "}}")?;
         writeln!(out)?;
@@ -484,7 +789,6 @@ pub fn dump_src_file(file: &Tjs2File) -> Result<String> {
 
     Ok(out)
 }
-
 
 /* ------------------------- structuring ------------------------- */
 
@@ -539,11 +843,13 @@ impl<'a> Structurer<'a> {
         let loops = compute_natural_loops(prog, &dom, &reachable);
 
         let uses_rv = prog.blocks.iter().any(|b| {
-            b.stmts.iter().any(|st| matches!(
-                st,
-                Stmt::Opaque { op, .. }
-                    if op.eq_ignore_ascii_case("SRV") || op.eq_ignore_ascii_case("VM_SRV")
-            ))
+            b.stmts.iter().any(|st| {
+                matches!(
+                    st,
+                    Stmt::Opaque { op, .. }
+                        if op.eq_ignore_ascii_case("SRV") || op.eq_ignore_ascii_case("VM_SRV")
+                )
+            })
         });
 
         Self {
@@ -564,15 +870,8 @@ impl<'a> Structurer<'a> {
     fn emit_function_body(&mut self, entry: usize, indent: usize) -> Vec<String> {
         let mut lines = Vec::new();
         let _ = self.emit_seq(entry, None, indent, None, &mut lines);
-
-        // Optionally dump unreachable blocks (still no goto/state-machine).
-        let reachable = compute_reachable(self.prog, self.prog.entry_block);
-        for b in 0..self.prog.blocks.len() {
-            if !reachable.contains(&b) {
-                lines.push(format!("{}// unreachable bb{}", " ".repeat(indent), b));
-                self.emit_block_stmts(b, indent, &mut lines);
-            }
-        }
+        // Unreachable blocks are silently omitted — no goto/state-machine fallback.
+        simplify_empty_if_then(&mut lines);
         lines
     }
 
@@ -587,12 +886,9 @@ impl<'a> Structurer<'a> {
         while Some(cur) != stop {
             let loop_ctx = loop_ctx.clone();
             if self.emitted.contains(&cur) {
-                out.push(format!(
-                    "{}// re-entry to already-emitted bb{}",
-                    " ".repeat(indent),
-                    cur
-                ));
-                return RegionOutcome { falls_through: true };
+                return RegionOutcome {
+                    falls_through: true,
+                };
             }
 
             if self.is_loop_header(cur) && stop != Some(cur) {
@@ -612,17 +908,18 @@ impl<'a> Structurer<'a> {
             match blk.term.clone() {
                 Terminator::Ret => {
                     if let Some(e) = self.ret_expr.get(cur).and_then(|x| x.clone()) {
-                        out.push(format!(
-                            "{}return {};",
-                            " ".repeat(indent),
-                            self.expr_to_tjs(&e)
-                        ));
-                    } else if self.uses_rv {
-                        out.push(format!("{}return __rv;", " ".repeat(indent)));
+                        let s = self.expr_to_tjs(&e);
+                        if s == "void" || s == "r0_0" {
+                            out.push(format!("{}return;", " ".repeat(indent)));
+                        } else {
+                            out.push(format!("{}return {};", " ".repeat(indent), s));
+                        }
                     } else {
                         out.push(format!("{}return;", " ".repeat(indent)));
                     }
-                    return RegionOutcome { falls_through: false };
+                    return RegionOutcome {
+                        falls_through: false,
+                    };
                 }
                 Terminator::Throw(e) => {
                     out.push(format!(
@@ -630,7 +927,9 @@ impl<'a> Structurer<'a> {
                         " ".repeat(indent),
                         self.expr_to_tjs(&e)
                     ));
-                    return RegionOutcome { falls_through: false };
+                    return RegionOutcome {
+                        falls_through: false,
+                    };
                 }
                 Terminator::Exit | Terminator::Fallthrough => {
                     if let Some(n) = blk.succ.get(0).copied() {
@@ -639,24 +938,32 @@ impl<'a> Structurer<'a> {
                         continue;
                     }
                     out.push(format!("{}return;", " ".repeat(indent)));
-                    return RegionOutcome { falls_through: false };
+                    return RegionOutcome {
+                        falls_through: false,
+                    };
                 }
                 Terminator::Jmp(t) => {
                     if let Some(ctx) = loop_ctx.clone() {
                         if t == ctx.header {
                             self.emit_edge_copies(cur, t, indent, out);
                             out.push(format!("{}continue;", " ".repeat(indent)));
-                            return RegionOutcome { falls_through: false };
+                            return RegionOutcome {
+                                falls_through: false,
+                            };
                         }
                         if ctx.exit == Some(t) {
                             self.emit_edge_copies(cur, t, indent, out);
                             out.push(format!("{}break;", " ".repeat(indent)));
-                            return RegionOutcome { falls_through: false };
+                            return RegionOutcome {
+                                falls_through: false,
+                            };
                         }
                     }
                     if stop == Some(t) {
                         self.emit_edge_copies(cur, t, indent, out);
-                        return RegionOutcome { falls_through: true };
+                        return RegionOutcome {
+                            falls_through: true,
+                        };
                     }
                     self.emit_edge_copies(cur, t, indent, out);
                     cur = t;
@@ -669,15 +976,13 @@ impl<'a> Structurer<'a> {
                 } => {
                     // If this branch is a loop-exit/continue inside a loop body, prioritize break/continue patterns.
                     if let Some(ctx) = loop_ctx.clone() {
-                        if if_true == ctx.header || if_false == ctx.header || ctx.exit == Some(if_true) || ctx.exit == Some(if_false) {
+                        if if_true == ctx.header
+                            || if_false == ctx.header
+                            || ctx.exit == Some(if_true)
+                            || ctx.exit == Some(if_false)
+                        {
                             let oc = self.emit_branch_in_loop(
-                                cur,
-                                &cond,
-                                if_true,
-                                if_false,
-                                indent,
-                                ctx,
-                                out,
+                                cur, &cond, if_true, if_false, indent, ctx, out,
                             );
                             return oc;
                         }
@@ -685,36 +990,63 @@ impl<'a> Structurer<'a> {
 
                     let join = self.ipdom.get(cur).and_then(|x| *x).or(stop);
 
+                    // If the then-branch is trivially empty but else is not, negate and swap
+                    // to avoid emitting `if (cond) { } else { ... }`.
+                    let (cond_emitted, first_succ, second_succ) = if self
+                        .branch_is_trivially_empty(cur, if_true, join)
+                        && !self.branch_is_trivially_empty(cur, if_false, join)
+                    {
+                        (Expr::Unary(UnOp::Not, Box::new(cond)), if_false, if_true)
+                    } else {
+                        (cond, if_true, if_false)
+                    };
+
                     out.push(format!(
                         "{}if ({}) {{",
                         " ".repeat(indent),
-                        self.expr_to_tjs(&cond)
+                        self.expr_to_tjs(&cond_emitted)
                     ));
 
-                    // then
-                    self.emit_edge_copies(cur, if_true, indent + 2, out);
-                    let then_oc = self.emit_seq(if_true, join, indent + 2, loop_ctx.clone(), out);
+                    // then (primary branch)
+                    self.emit_edge_copies(cur, first_succ, indent + 2, out);
+                    let then_oc =
+                        self.emit_seq(first_succ, join, indent + 2, loop_ctx.clone(), out);
                     out.push(format!("{}}}", " ".repeat(indent)));
 
-                    // else
-                    out.push(format!("{}else {{", " ".repeat(indent)));
-                    self.emit_edge_copies(cur, if_false, indent + 2, out);
-                    let else_oc = self.emit_seq(if_false, join, indent + 2, loop_ctx, out);
-                    out.push(format!("{}}}", " ".repeat(indent)));
+                    // else (secondary branch) — omit the else block when trivially empty
+                    let second_is_empty = self.branch_is_trivially_empty(cur, second_succ, join);
+                    let else_oc = if second_is_empty {
+                        self.mark_chain_emitted(second_succ, join);
+                        RegionOutcome {
+                            falls_through: true,
+                        }
+                    } else {
+                        out.push(format!("{}else {{", " ".repeat(indent)));
+                        self.emit_edge_copies(cur, second_succ, indent + 2, out);
+                        let oc = self.emit_seq(second_succ, join, indent + 2, loop_ctx, out);
+                        out.push(format!("{}}}", " ".repeat(indent)));
+                        oc
+                    };
 
                     if let Some(j) = join {
                         if then_oc.falls_through || else_oc.falls_through {
                             cur = j;
                             continue;
                         }
-                        return RegionOutcome { falls_through: false };
+                        return RegionOutcome {
+                            falls_through: false,
+                        };
                     }
-                    return RegionOutcome { falls_through: then_oc.falls_through || else_oc.falls_through };
+                    return RegionOutcome {
+                        falls_through: then_oc.falls_through || else_oc.falls_through,
+                    };
                 }
             }
         }
 
-        RegionOutcome { falls_through: true }
+        RegionOutcome {
+            falls_through: true,
+        }
     }
 
     fn emit_branch_in_loop(
@@ -745,7 +1077,9 @@ impl<'a> Structurer<'a> {
         let else_oc = self.emit_seq(f, None, indent + 2, Some(ctx), out);
         out.push(format!("{}}}", " ".repeat(indent)));
 
-        RegionOutcome { falls_through: then_oc.falls_through || else_oc.falls_through }
+        RegionOutcome {
+            falls_through: then_oc.falls_through || else_oc.falls_through,
+        }
     }
 
     fn is_loop_header(&self, h: usize) -> bool {
@@ -766,7 +1100,11 @@ impl<'a> Structurer<'a> {
     fn emit_loop(&mut self, header: usize, indent: usize, out: &mut Vec<String>) -> RegionOutcome {
         let body_nodes = match self.loops.get(&header) {
             Some(s) => s.clone(),
-            None => return RegionOutcome { falls_through: true },
+            None => {
+                return RegionOutcome {
+                    falls_through: true,
+                };
+            }
         };
 
         // Choose loop exit as header successor not in loop set.
@@ -780,7 +1118,11 @@ impl<'a> Structurer<'a> {
         // Handle header terminator as loop guard / dispatch.
         let blk = &self.prog.blocks[header];
         match blk.term.clone() {
-            Terminator::Br { cond, if_true, if_false } => {
+            Terminator::Br {
+                cond,
+                if_true,
+                if_false,
+            } => {
                 // Decide which successor stays in loop.
                 let t_in = body_nodes.contains(&if_true);
                 let f_in = body_nodes.contains(&if_false);
@@ -868,11 +1210,12 @@ impl<'a> Structurer<'a> {
             }
             Terminator::Ret => {
                 if let Some(e) = self.ret_expr.get(header).and_then(|x| x.clone()) {
-                    out.push(format!(
-                        "{}return {};",
-                        " ".repeat(indent + 2),
-                        self.expr_to_tjs(&e)
-                    ));
+                    let s = self.expr_to_tjs(&e);
+                    if s == "void" || s == "r0_0" {
+                        out.push(format!("{}return;", " ".repeat(indent + 2)));
+                    } else {
+                        out.push(format!("{}return {};", " ".repeat(indent + 2), s));
+                    }
                 } else {
                     out.push(format!("{}return;", " ".repeat(indent + 2)));
                 }
@@ -908,28 +1251,94 @@ impl<'a> Structurer<'a> {
         }
         self.emitted.insert(header);
 
-        RegionOutcome { falls_through: exit.is_some() }
+        RegionOutcome {
+            falls_through: exit.is_some(),
+        }
+    }
+
+    /// Returns true when branching from `pred` to `succ` (with `stop` as the region limit)
+    /// would emit zero lines: no non-trivial edge copies, no block statements, and every block
+    /// in the single-successor chain eventually falls to `stop` (follows Jmp/Fallthrough/Exit
+    /// only, up to `depth` hops, with cycle detection).
+    fn branch_is_trivially_empty(&self, pred: usize, succ: usize, stop: Option<usize>) -> bool {
+        let mut visited = HashSet::new();
+        self.chain_is_empty(pred, succ, stop, &mut visited, 16)
+    }
+
+    fn chain_is_empty(
+        &self,
+        pred: usize,
+        succ: usize,
+        stop: Option<usize>,
+        visited: &mut HashSet<usize>,
+        depth: usize,
+    ) -> bool {
+        // Always check edge copies from pred→succ first (including when succ==stop),
+        // so that live phi edge copies on the final hop are not silently skipped.
+        if let Some(xs) = self.edge_copies.get(&(pred, succ)) {
+            for (d, s) in xs {
+                if (self.fmt_var)(*d) != (self.fmt_var)(*s) {
+                    return false;
+                }
+            }
+        }
+        if Some(succ) == stop {
+            return true;
+        }
+        if depth == 0 || !visited.insert(succ) {
+            return false;
+        }
+        let blk = &self.prog.blocks[succ];
+        // Any non-control stmt → not empty.
+        for st in &blk.stmts {
+            if !matches!(st, Stmt::Opaque { op, .. } if is_control_op(op)) {
+                return false;
+            }
+        }
+        // Follow single-successor terminators only.
+        match &blk.term {
+            Terminator::Jmp(t) => self.chain_is_empty(succ, *t, stop, visited, depth - 1),
+            Terminator::Fallthrough | Terminator::Exit => match blk.succ.get(0).copied() {
+                Some(t) => self.chain_is_empty(succ, t, stop, visited, depth - 1),
+                None => stop.is_none(),
+            },
+            _ => false,
+        }
+    }
+
+    /// Mark all blocks in the single-successor chain from `succ` up to (but not including)
+    /// `stop` as emitted.  Called when we skip an empty branch entirely.
+    fn mark_chain_emitted(&mut self, succ: usize, stop: Option<usize>) {
+        let mut cur = succ;
+        loop {
+            if Some(cur) == stop || !self.emitted.insert(cur) {
+                break;
+            }
+            let blk = &self.prog.blocks[cur];
+            match &blk.term {
+                Terminator::Jmp(t) => cur = *t,
+                Terminator::Fallthrough | Terminator::Exit => match blk.succ.get(0).copied() {
+                    Some(t) => cur = t,
+                    None => break,
+                },
+                _ => break,
+            }
+        }
     }
 
     fn emit_block_stmts(&self, bid: usize, indent: usize, out: &mut Vec<String>) {
         let blk = &self.prog.blocks[bid];
-
-        // Optional block header comment (helps debugging; not a helper function).
-        out.push(format!(
-            "{}// bb{} @{}",
-            " ".repeat(indent),
-            blk.id,
-            blk.start_pc
-        ));
-
         for st in &blk.stmts {
             if let Stmt::Opaque { op, .. } = st {
-                // Skip CFG-control ops (they are represented by Terminator).
                 if is_control_op(op) {
                     continue;
                 }
             }
-            out.push(format!("{}{}", " ".repeat(indent), self.stmt_to_tjs(st)));
+            let s = self.stmt_to_tjs(st);
+            if s.is_empty() || s == "// (control op omitted)" {
+                continue;
+            }
+            out.push(format!("{}{}", " ".repeat(indent), s));
         }
     }
 
@@ -937,7 +1346,15 @@ impl<'a> Structurer<'a> {
         if let Some(xs) = self.edge_copies.get(&(pred, succ)) {
             for (dst, src) in xs {
                 let d = (self.fmt_var)(*dst);
-                let s = (self.fmt_var)(*src);
+                // r0_0 (initial void of result register) renders as "void".
+                let s = if src.var == Var::Reg(0) && src.ver == 0 {
+                    "void".to_string()
+                } else {
+                    (self.fmt_var)(*src)
+                };
+                if d == s {
+                    continue; // skip self-assignments
+                }
                 out.push(format!("{}{} = {};", " ".repeat(indent), d, s));
             }
         }
@@ -949,9 +1366,18 @@ impl<'a> Structurer<'a> {
                 format!("{} = {};", (self.fmt_var)(*dst), self.expr_to_tjs(expr))
             }
             Stmt::Store { target, value } => {
-                format!("{} = {};", self.expr_to_tjs(target), self.expr_to_tjs(value))
+                format!(
+                    "{} = {};",
+                    self.expr_to_tjs(target),
+                    self.expr_to_tjs(value)
+                )
             }
-            Stmt::Update { dst, target, op, rhs } => {
+            Stmt::Update {
+                dst,
+                target,
+                op,
+                rhs,
+            } => {
                 if let Some(comp) = to_compound_assign(*op) {
                     if let Some(d) = dst {
                         format!(
@@ -993,8 +1419,8 @@ impl<'a> Structurer<'a> {
             Stmt::Expr(e) => format!("{};", self.expr_to_tjs(e)),
             Stmt::Opaque { op, args, defs } => {
                 match op.to_string().as_str() {
-                    "JF" | "JNF" | "JMP" | "RET" | "THROW" | "ENTRY" | "EXTRY" |
-                    "VM_JF" | "VM_JNF" | "VM_JMP" | "VM_RET" | "VM_THROW" | "VM_ENTRY" | "VM_EXTRY" => {
+                    "JF" | "JNF" | "JMP" | "RET" | "THROW" | "ENTRY" | "EXTRY" | "VM_JF"
+                    | "VM_JNF" | "VM_JMP" | "VM_RET" | "VM_THROW" | "VM_ENTRY" | "VM_EXTRY" => {
                         return "// (control op omitted)".to_string();
                     }
                     _ => {}
@@ -1004,7 +1430,12 @@ impl<'a> Structurer<'a> {
                     return "// (this-change op omitted)".to_string();
                 }
 
-                if (op_name == "VM_TYPEOFD" || op_name == "TYPEOFD" || op_name == "VM_TYPEOF" || op_name == "TYPEOF") && args.len() == 1 {
+                if (op_name == "VM_TYPEOFD"
+                    || op_name == "TYPEOFD"
+                    || op_name == "VM_TYPEOF"
+                    || op_name == "TYPEOF")
+                    && args.len() == 1
+                {
                     let x = args[0].to_tjs_with(self.fmt_var);
                     let expr = format!("(typeof {})", x);
 
@@ -1023,13 +1454,9 @@ impl<'a> Structurer<'a> {
                     }
                 }
 
-                if (op_name == "VM_SRV" || op_name == "SRV") && args.len() == 1 {
-                    let x = args[0].to_tjs_with(self.fmt_var);
-                    let mut s = format!("__rv = {};", x);
-                    if defs.len() == 1 {
-                        s.push_str(&format!(" {} = __rv;", (self.fmt_var)(defs[0])));
-                    }
-                    return s;
+                if op_name == "VM_SRV" || op_name == "SRV" {
+                    // SRV is represented by ret_expr in the Structurer; suppress inline output.
+                    return String::new();
                 }
 
                 if (op_name == "VM_NUM" || op_name == "NUM") && args.len() == 1 {
@@ -1057,7 +1484,8 @@ impl<'a> Structurer<'a> {
 
                 if op_name == "VM_CHGTHIS" || op_name == "CHGTHIS" {
                     if args.len() == 2 {
-                        return format!("chgthis({}, {});",
+                        return format!(
+                            "chgthis({}, {});",
                             args[0].to_tjs_with(self.fmt_var),
                             args[1].to_tjs_with(self.fmt_var),
                         );
@@ -1066,16 +1494,20 @@ impl<'a> Structurer<'a> {
                 }
 
                 if op_name.starts_with("VM_REGMEMBER") && args.len() == 3 {
-                    return format!("{}.{} = {};", 
+                    return format!(
+                        "{}.{} = {};",
                         args[0].to_tjs_with(self.fmt_var),
                         args[1].to_tjs_with(self.fmt_var),
-                        args[2].to_tjs_with(self.fmt_var));
+                        args[2].to_tjs_with(self.fmt_var)
+                    );
                 }
 
                 if op_name.starts_with("VM_INV") && args.len() >= 2 {
                     let recv = args[0].to_tjs_with(self.fmt_var);
                     let method = args[1].to_tjs_with(self.fmt_var);
-                    let call_args = args.iter().skip(2)
+                    let call_args = args
+                        .iter()
+                        .skip(2)
                         .map(|x| x.to_tjs_with(self.fmt_var))
                         .collect::<Vec<_>>()
                         .join(", ");
@@ -1086,7 +1518,6 @@ impl<'a> Structurer<'a> {
                         return format!("{};", call);
                     }
                 }
-
 
                 let call = if args.is_empty() {
                     format!("{}()", op)
@@ -1109,43 +1540,61 @@ impl<'a> Structurer<'a> {
 
                     let call = if let (Some(x), Some(y)) = (a0.as_deref(), a1.as_deref()) {
                         // binary families (cover D/I/P variants by starts_with)
-                        if opname.starts_with("VM_ADD") { format!("({} + {})", x, y) }
-                        else if opname.starts_with("VM_SUB") { format!("({} - {})", x, y) }
-                        else if opname.starts_with("VM_MUL") { format!("({} * {})", x, y) }
-                        else if opname.starts_with("VM_DIV") { format!("({} / {})", x, y) }
-                        else if opname.starts_with("VM_IDIV") { format!("({} \\ {})", x, y) }
-                        else if opname.starts_with("VM_MOD") { format!("({} % {})", x, y) }
-
-                        else if opname.starts_with("VM_SAL") { format!("({} << {})", x, y) }
-                        else if opname.starts_with("VM_SAR") { format!("({} >> {})", x, y) }
-                        else if opname.starts_with("VM_SR")  { format!("({} >>> {})", x, y) }
-
-                        else if opname.starts_with("VM_BAND") { format!("({} & {})", x, y) }
-                        else if opname.starts_with("VM_BXOR") { format!("({} ^ {})", x, y) }
-                        else if opname.starts_with("VM_BOR")  { format!("({} | {})", x, y) }
-
-                        else if opname.starts_with("VM_LAND") { format!("({} && {})", x, y) }
-                        else if opname.starts_with("VM_LOR")  { format!("({} || {})", x, y) }
-
-                        else if opname.starts_with("VM_EQ")  { format!("({} == {})", x, y) }
-                        else if opname.starts_with("VM_NE")  { format!("({} != {})", x, y) }
-                        else if opname.starts_with("VM_DEQ") { format!("({} === {})", x, y) }
-                        else if opname.starts_with("VM_DNE") { format!("({} !== {})", x, y) }
-
-                        else if opname.starts_with("VM_LT") { format!("({} < {})", x, y) }
-                        else if opname.starts_with("VM_LE") { format!("({} <= {})", x, y) }
-                        else if opname.starts_with("VM_GT") { format!("({} > {})", x, y) }
-                        else if opname.starts_with("VM_GE") { format!("({} >= {})", x, y) }
-
-                        else if opname.to_string() == "CHKINS" || opname.starts_with("VM_IN") { format!("({} in {})", x, y) }
-
-                        else {
+                        if opname.starts_with("VM_ADD") {
+                            format!("({} + {})", x, y)
+                        } else if opname.starts_with("VM_SUB") {
+                            format!("({} - {})", x, y)
+                        } else if opname.starts_with("VM_MUL") {
+                            format!("({} * {})", x, y)
+                        } else if opname.starts_with("VM_DIV") {
+                            format!("({} / {})", x, y)
+                        } else if opname.starts_with("VM_IDIV") {
+                            format!("({} \\ {})", x, y)
+                        } else if opname.starts_with("VM_MOD") {
+                            format!("({} % {})", x, y)
+                        } else if opname.starts_with("VM_SAL") {
+                            format!("({} << {})", x, y)
+                        } else if opname.starts_with("VM_SAR") {
+                            format!("({} >> {})", x, y)
+                        } else if opname.starts_with("VM_SR") {
+                            format!("({} >>> {})", x, y)
+                        } else if opname.starts_with("VM_BAND") {
+                            format!("({} & {})", x, y)
+                        } else if opname.starts_with("VM_BXOR") {
+                            format!("({} ^ {})", x, y)
+                        } else if opname.starts_with("VM_BOR") {
+                            format!("({} | {})", x, y)
+                        } else if opname.starts_with("VM_LAND") {
+                            format!("({} && {})", x, y)
+                        } else if opname.starts_with("VM_LOR") {
+                            format!("({} || {})", x, y)
+                        } else if opname.starts_with("VM_EQ") {
+                            format!("({} == {})", x, y)
+                        } else if opname.starts_with("VM_NE") {
+                            format!("({} != {})", x, y)
+                        } else if opname.starts_with("VM_DEQ") {
+                            format!("({} === {})", x, y)
+                        } else if opname.starts_with("VM_DNE") {
+                            format!("({} !== {})", x, y)
+                        } else if opname.starts_with("VM_LT") {
+                            format!("({} < {})", x, y)
+                        } else if opname.starts_with("VM_LE") {
+                            format!("({} <= {})", x, y)
+                        } else if opname.starts_with("VM_GT") {
+                            format!("({} > {})", x, y)
+                        } else if opname.starts_with("VM_GE") {
+                            format!("({} >= {})", x, y)
+                        } else if opname.to_string() == "CHKINS" || opname.starts_with("VM_IN") {
+                            format!("({} in {})", x, y)
+                        } else {
                             // fallback to original call form
                             let mut s = String::new();
                             s.push_str(op);
                             s.push('(');
                             for (i, a) in args.iter().enumerate() {
-                                if i != 0 { s.push_str(", "); }
+                                if i != 0 {
+                                    s.push_str(", ");
+                                }
                                 s.push_str(&a.to_tjs_with(self.fmt_var));
                             }
                             s.push(')');
@@ -1153,20 +1602,29 @@ impl<'a> Structurer<'a> {
                         }
                     } else if let Some(x) = a0.as_deref() {
                         // unary families (also cover variants)
-                        if opname.starts_with("VM_CHS") { format!("(-{})", x) }
-                        else if opname.starts_with("VM_LNOT") { format!("(!{})", x) }
-                        else if opname.starts_with("VM_BNOT") { format!("(~{})", x) }
-                        else if opname.starts_with("VM_TYPEOF") { format!("(typeof {})", x) }
-                        else if opname.starts_with("VM_DELETE") { format!("(delete {})", x) }
-                        else if opname.starts_with("VM_INC") { format!("({} + 1)", x) } 
-                        else if opname.starts_with("VM_DEC") { format!("({} - 1)", x) } 
-                        else {
+                        if opname.starts_with("VM_CHS") {
+                            format!("(-{})", x)
+                        } else if opname.starts_with("VM_LNOT") {
+                            format!("(!{})", x)
+                        } else if opname.starts_with("VM_BNOT") {
+                            format!("(~{})", x)
+                        } else if opname.starts_with("VM_TYPEOF") {
+                            format!("(typeof {})", x)
+                        } else if opname.starts_with("VM_DELETE") {
+                            format!("(delete {})", x)
+                        } else if opname.starts_with("VM_INC") {
+                            format!("({} + 1)", x)
+                        } else if opname.starts_with("VM_DEC") {
+                            format!("({} - 1)", x)
+                        } else {
                             // fallback
                             let mut s = String::new();
                             s.push_str(op);
                             s.push('(');
                             for (i, a) in args.iter().enumerate() {
-                                if i != 0 { s.push_str(", "); }
+                                if i != 0 {
+                                    s.push_str(", ");
+                                }
                                 s.push_str(&a.to_tjs_with(self.fmt_var));
                             }
                             s.push(')');
@@ -1175,7 +1633,6 @@ impl<'a> Structurer<'a> {
                     } else {
                         format!("{}()", op)
                     };
-
 
                     call
                 };
@@ -1193,12 +1650,7 @@ impl<'a> Structurer<'a> {
                     s.push_str(&call);
                     s.push_str("; ");
                     for (i, d) in defs.iter().enumerate() {
-                        let _ = write!(
-                            &mut s,
-                            "{} = __t[{}]; ",
-                            (self.fmt_var)(*d),
-                            i
-                        );
+                        let _ = write!(&mut s, "{} = __t[{}]; ", (self.fmt_var)(*d), i);
                     }
                     s.push_str("}");
                     s
@@ -1219,9 +1671,7 @@ fn build_edge_copies(prog: &ExprProgram) -> HashMap<(usize, usize), Vec<(VarId, 
     for b in &prog.blocks {
         for phi in &b.phi {
             for (pred, v) in &phi.args {
-                m.entry((*pred, b.id))
-                    .or_default()
-                    .push((phi.result, *v));
+                m.entry((*pred, b.id)).or_default().push((phi.result, *v));
             }
         }
     }
@@ -1442,73 +1892,44 @@ fn to_compound_assign(op: BinOp) -> Option<BinOp> {
 }
 
 fn is_control_op(op: &str) -> bool {
-    op.eq_ignore_ascii_case("JMP")
-        || op.eq_ignore_ascii_case("JF")
-        || op.eq_ignore_ascii_case("JNF")
-        || op.eq_ignore_ascii_case("RET")
-        || op.eq_ignore_ascii_case("THROW")
-        || op.eq_ignore_ascii_case("ENTRY")
-        || op.eq_ignore_ascii_case("EXTRY")
-}
-
-fn infer_arg_regs(prog: &ExprProgram) -> Vec<i32> {
-    let vars = collect_vars(prog);
-    let mut neg_regs: Vec<i32> = vars
-        .iter()
-        .filter_map(|v| match v.var {
-            Var::Reg(r) if r <= -3 => Some(r),
-            _ => None,
-        })
-        .collect();
-    neg_regs.sort();
-    neg_regs.dedup();
-
-    // Only keep the conventional arg window: r-3, r-4, ...
-    // If none, return empty.
-    if neg_regs.is_empty() {
-        return vec![];
-    }
-
-    // Find the minimum negative register observed (e.g., -7)
-    let min_r = *neg_regs.first().unwrap();
-
-    // We always start at -3 as args base. If min_r is -1/-2, ignore them (usually special regs).
-    let start = -3;
-    if min_r > start {
-        return vec![]; // no conventional args seen
-    }
-
-    // return [-3, -4, ..., min_r]
-    (min_r..=start).rev().collect()
-}
-
-fn arg_name_for_reg(r: i32) -> String {
-    // r-3 -> a0, r-4 -> a1 ...
-    let idx = (-3 - r) as usize;
-    format!("a{}_1", idx)
+    let bare = op.strip_prefix("VM_").unwrap_or(op);
+    bare.eq_ignore_ascii_case("JMP")
+        || bare.eq_ignore_ascii_case("JF")
+        || bare.eq_ignore_ascii_case("JNF")
+        || bare.eq_ignore_ascii_case("RET")
+        || bare.eq_ignore_ascii_case("THROW")
+        || bare.eq_ignore_ascii_case("ENTRY")
+        || bare.eq_ignore_ascii_case("EXTRY")
 }
 
 fn emit_var_decls(
     out: &mut String,
     prog: &ExprProgram,
     fmt_var: &dyn Fn(VarId) -> String,
+    arg_count: usize,
+    indent: usize,
 ) -> Result<()> {
     let mut vars: Vec<VarId> = collect_vars(prog);
     vars.sort_by_key(|v| (var_key(v), v.ver));
+    // Declare positive registers, frame locals (_fr*), and special vars.
+    // Do NOT declare declared params (a0..a{n-1}) or special regs (-1=this, -2=global/this).
+    // Also skip r0_0 (ver=0 of reg 0) — it's always void and never declared.
     vars.retain(|v| match v.var {
-        Var::Reg(r) => r >= 0,
-        _ => true,
+        Var::Reg(r) if r >= 0 => !(r == 0 && v.ver == 0), // skip r0_0
+        Var::Reg(r) if r <= -3 => (-3 - r) as usize >= arg_count, // frame locals only, not args
+        Var::Flag | Var::Exception => true,
+        _ => false,
     });
+    vars.dedup_by_key(|v| fmt_var(*v));
     if vars.is_empty() {
-        writeln!(out, "  // no SSA vars")?;
         return Ok(());
     }
 
-    // emit in chunks
+    let pad = " ".repeat(indent);
     let mut i = 0usize;
     while i < vars.len() {
         let end = (i + 12).min(vars.len());
-        write!(out, "  var ")?;
+        write!(out, "{}var ", pad)?;
         for j in i..end {
             if j != i {
                 write!(out, ", ")?;
@@ -1550,7 +1971,9 @@ fn collect_vars_stmt(st: &Stmt, s: &mut HashSet<VarId>) {
             collect_vars_expr(target, s);
             collect_vars_expr(value, s);
         }
-        Stmt::Update { dst, target, rhs, .. } => {
+        Stmt::Update {
+            dst, target, rhs, ..
+        } => {
             if let Some(d) = dst {
                 s.insert(*d);
             }
@@ -1624,14 +2047,10 @@ fn var_key(v: &VarId) -> (u8, i32) {
 
 fn fmt_vid_tjs(vid: VarId) -> String {
     match vid.var {
-        Var::Reg(r) => {
-            // format!("r{}_{}", r, vid.ver)
-            if r >= 0 {
-                format!("r{}_{}", r, vid.ver)
-            } else {
-                format!("a{}_{}", -3 - r, vid.ver)
-            }
-        },
+        Var::Reg(r) if r >= 0 => format!("r{}_{}", r, vid.ver),
+        Var::Reg(-1) => "this".to_string(),
+        Var::Reg(-2) => "global".to_string(),
+        Var::Reg(r) => format!("a{}", (-3 - r) as usize),
         Var::Flag => format!("flag_{}", vid.ver),
         Var::Exception => format!("exc_{}", vid.ver),
     }
@@ -1647,9 +2066,65 @@ fn obj_lhs(index: usize, name: Option<&str>) -> String {
     format!("obj{}", index)
 }
 
+/// Post-processing pass: collapse `if (cond) { } else { ... }` into `if (!cond) { ... }`.
+/// Operates on a flat list of lines with consistent indentation.
+fn simplify_empty_if_then(lines: &mut Vec<String>) {
+    let mut i = 0;
+    while i + 2 < lines.len() {
+        let ind0 = leading_spaces(&lines[i]);
+        let ind1 = leading_spaces(&lines[i + 1]);
+        let ind2 = leading_spaces(&lines[i + 2]);
+        let ln0 = lines[i][ind0..].trim_end();
+        let ln1 = lines[i + 1][ind1..].trim_end();
+        let ln2 = lines[i + 2][ind2..].trim_end();
+
+        if ind0 == ind1
+            && ind0 == ind2
+            && ln0.starts_with("if (")
+            && ln0.ends_with(") {")
+            && ln1 == "}"
+            && ln2 == "else {"
+        {
+            let cond = &ln0["if (".len()..ln0.len() - ") {".len()];
+            let ncond = negate_str_cond(cond);
+            let spaces = " ".repeat(ind0);
+            lines[i] = format!("{}if ({}) {{", spaces, ncond);
+            lines.remove(i + 2); // "else {"
+            lines.remove(i + 1); // "}"
+        // Don't increment — recheck this line in case of further nesting.
+        } else {
+            i += 1;
+        }
+    }
+}
+
+fn leading_spaces(s: &str) -> usize {
+    s.len() - s.trim_start().len()
+}
+
+/// Negate a condition string syntactically:
+/// - `"!expr"` / `"!(inner)"` → strip outer negation
+/// - simple identifier → `"!ident"`
+/// - anything else → `"!(cond)"`
+fn negate_str_cond(cond: &str) -> String {
+    if let Some(rest) = cond.strip_prefix('!') {
+        if rest.starts_with('(') && rest.ends_with(')') {
+            rest[1..rest.len() - 1].to_string()
+        } else {
+            rest.to_string()
+        }
+    } else if cond.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        format!("!{}", cond)
+    } else {
+        format!("!({})", cond)
+    }
+}
+
 fn is_identifier(s: &str) -> bool {
     let mut it = s.chars();
-    let Some(c0) = it.next() else { return false; };
+    let Some(c0) = it.next() else {
+        return false;
+    };
     if !(c0 == '_' || c0.is_ascii_alphabetic()) {
         return false;
     }

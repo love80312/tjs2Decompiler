@@ -5,6 +5,7 @@ A minimal, strict **TJS2 (Kirikiri2 / Kirikiri-Z)** bytecode loader and disassem
 ## Features
 
 ![Arch](asserts/arch.png)
+![Example](asserts/decompiled.png)
 
 
 * **Disassemble**: Convert binary bytecode into human-readable assembly mnemonics.

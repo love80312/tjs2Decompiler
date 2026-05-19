@@ -1,11 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 use crate::model::Tjs2Object;
 use crate::vmcodes::vm;
 
-use super::decode::{decode_object, Insn};
+use super::decode::{Insn, decode_object};
 
 #[derive(Debug, Clone)]
 pub struct BasicBlock {
@@ -30,7 +30,7 @@ pub struct Cfg {
 #[derive(Debug, Clone)]
 pub struct TryRegion {
     pub start_pc: usize,
-    pub end_pc: usize,   // exclusive
+    pub end_pc: usize, // exclusive
     pub catch_pc: usize,
     pub ex_reg: i32,
     pub depth: usize,
@@ -45,7 +45,9 @@ impl Cfg {
         let leaders = compute_leaders(&insns, code_len, &try_regions)?;
         let (mut blocks, pc_to_block) = build_blocks(obj.index, code_len, &insns, &leaders)?;
         connect_edges(&mut blocks, &pc_to_block, code_len, &try_regions)?;
-        let entry_block = *pc_to_block.get(&0).ok_or_else(|| anyhow::anyhow!("missing entry block"))?;
+        let entry_block = *pc_to_block
+            .get(&0)
+            .ok_or_else(|| anyhow::anyhow!("missing entry block"))?;
 
         Ok(Self {
             obj_index: obj.index,
@@ -59,7 +61,10 @@ impl Cfg {
     }
 }
 
-fn parse_try_regions(insns: &[Insn], code_len: usize) -> Result<(Vec<TryRegion>, HashMap<usize, i32>)> {
+fn parse_try_regions(
+    insns: &[Insn],
+    code_len: usize,
+) -> Result<(Vec<TryRegion>, HashMap<usize, i32>)> {
     // Model nesting based on ENTRY/EXTRY.
     // Range: from (entry_pc + 3) up to (extry_pc) exclusive.
     let mut stack: Vec<(usize, usize, i32)> = Vec::new(); // (start_pc, catch_pc, ex_reg)
@@ -75,7 +80,11 @@ fn parse_try_regions(insns: &[Insn], code_len: usize) -> Result<(Vec<TryRegion>,
                 let catch_rel = insn.words[1];
                 let catch_pc = (insn.pc as i32 + catch_rel) as isize;
                 if catch_pc < 0 || catch_pc as usize >= code_len {
-                    bail!("ENTRY catch target out of range: pc={} rel={}", insn.pc, catch_rel);
+                    bail!(
+                        "ENTRY catch target out of range: pc={} rel={}",
+                        insn.pc,
+                        catch_rel
+                    );
                 }
                 let catch_pc = catch_pc as usize;
                 let ex_reg = insn.words[2];
@@ -119,7 +128,11 @@ fn parse_try_regions(insns: &[Insn], code_len: usize) -> Result<(Vec<TryRegion>,
     Ok((regions, catch_sites))
 }
 
-fn compute_leaders(insns: &[Insn], code_len: usize, try_regions: &[TryRegion]) -> Result<BTreeSet<usize>> {
+fn compute_leaders(
+    insns: &[Insn],
+    code_len: usize,
+    try_regions: &[TryRegion],
+) -> Result<BTreeSet<usize>> {
     let mut leaders: BTreeSet<usize> = BTreeSet::new();
     leaders.insert(0);
 
@@ -204,7 +217,10 @@ fn build_blocks(
         let mut cur_pc = start_pc;
         let mut blk_insns = Vec::new();
         while cur_pc < end_pc {
-            let insn = insn_at.get(&cur_pc).cloned().ok_or_else(|| anyhow::anyhow!("no instruction at pc {}", cur_pc))?;
+            let insn = insn_at
+                .get(&cur_pc)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("no instruction at pc {}", cur_pc))?;
             cur_pc += insn.size;
             blk_insns.push(insn);
         }
@@ -249,13 +265,23 @@ fn connect_edges(
         match last.op {
             x if x == vm::VM_JMP => {
                 let t = (pc as i32 + last.words[1]) as usize;
-                succ.push(*pc_to_block.get(&t).ok_or_else(|| anyhow::anyhow!("missing block for JMP target {}", t))?);
+                succ.push(
+                    *pc_to_block
+                        .get(&t)
+                        .ok_or_else(|| anyhow::anyhow!("missing block for JMP target {}", t))?,
+                );
             }
             x if x == vm::VM_JF || x == vm::VM_JNF => {
                 let t = (pc as i32 + last.words[1]) as usize;
-                succ.push(*pc_to_block.get(&t).ok_or_else(|| anyhow::anyhow!("missing block for JF/JNF target {}", t))?);
+                succ.push(
+                    *pc_to_block
+                        .get(&t)
+                        .ok_or_else(|| anyhow::anyhow!("missing block for JF/JNF target {}", t))?,
+                );
                 if next < code_len {
-                    succ.push(*pc_to_block.get(&next).ok_or_else(|| anyhow::anyhow!("missing block for fallthrough {}", next))?);
+                    succ.push(*pc_to_block.get(&next).ok_or_else(|| {
+                        anyhow::anyhow!("missing block for fallthrough {}", next)
+                    })?);
                 }
             }
             x if x == vm::VM_RET || x == vm::VM_THROW => {

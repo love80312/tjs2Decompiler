@@ -93,9 +93,16 @@ impl SsaProgram {
     pub fn dump(&self) -> String {
         let mut out = String::new();
         for b in &self.blocks {
-            out.push_str(&format!("-- bb{} @{} (pred={:?}, succ={:?})\n", b.id, b.start_pc, b.pred, b.succ));
+            out.push_str(&format!(
+                "-- bb{} @{} (pred={:?}, succ={:?})\n",
+                b.id, b.start_pc, b.pred, b.succ
+            ));
             for p in &b.phi {
-                out.push_str(&format!("  {} = phi {}", fmt_varid(p.result), fmt_var(p.var)));
+                out.push_str(&format!(
+                    "  {} = phi {}",
+                    fmt_varid(p.result),
+                    fmt_var(p.var)
+                ));
                 if !p.args.is_empty() {
                     out.push_str(" [");
                     for (i, (pred, v)) in p.args.iter().enumerate() {
@@ -346,7 +353,11 @@ fn rename(cfg: &Cfg, dom: &DomInfo, blocks: &mut [SsaBlock]) {
         st.push(VarId { var: v, ver: 0 });
     }
 
-    fn new_ver(v: Var, counters: &mut HashMap<Var, u32>, stacks: &mut HashMap<Var, Vec<VarId>>) -> VarId {
+    fn new_ver(
+        v: Var,
+        counters: &mut HashMap<Var, u32>,
+        stacks: &mut HashMap<Var, Vec<VarId>>,
+    ) -> VarId {
         let c = counters.entry(v).or_insert(0);
         *c += 1;
         let id = VarId { var: v, ver: *c };
@@ -355,7 +366,10 @@ fn rename(cfg: &Cfg, dom: &DomInfo, blocks: &mut [SsaBlock]) {
     }
 
     fn cur(v: Var, stacks: &HashMap<Var, Vec<VarId>>) -> VarId {
-        stacks.get(&v).and_then(|s| s.last().copied()).unwrap_or(VarId { var: v, ver: 0 })
+        stacks
+            .get(&v)
+            .and_then(|s| s.last().copied())
+            .unwrap_or(VarId { var: v, ver: 0 })
     }
 
     fn dfs(
@@ -418,10 +432,15 @@ fn rename(cfg: &Cfg, dom: &DomInfo, blocks: &mut [SsaBlock]) {
         }
 
         // Populate phi arguments for successors.
-        let end_state: HashMap<Var, VarId> = stacks.iter().map(|(&v, s)| (v, *s.last().unwrap())).collect();
+        let end_state: HashMap<Var, VarId> = stacks
+            .iter()
+            .map(|(&v, s)| (v, *s.last().unwrap()))
+            .collect();
         for &succ in blocks[bid].succ.iter() {
             for p in blocks[succ].phi.iter_mut() {
-                let val = *end_state.get(&p.var).unwrap_or(&VarId { var: p.var, ver: 0 });
+                let val = *end_state
+                    .get(&p.var)
+                    .unwrap_or(&VarId { var: p.var, ver: 0 });
                 p.args.push((bid, val));
             }
         }
@@ -439,7 +458,14 @@ fn rename(cfg: &Cfg, dom: &DomInfo, blocks: &mut [SsaBlock]) {
         }
     }
 
-    dfs(cfg.entry_block, cfg, dom, blocks, &mut counters, &mut stacks);
+    dfs(
+        cfg.entry_block,
+        cfg,
+        dom,
+        blocks,
+        &mut counters,
+        &mut stacks,
+    );
 }
 
 fn effects_of(op: i32, words: &[i32]) -> (Vec<Var>, Vec<Var>) {
@@ -462,13 +488,28 @@ fn effects_of(op: i32, words: &[i32]) -> (Vec<Var>, Vec<Var>) {
 
     // Opcodes that define/consume the flag.
     // Note: SETF/SETNF are constant-set-to-register, not flag operations.
-    if matches!(op, vm::VM_CEQ | vm::VM_CDEQ | vm::VM_CLT | vm::VM_CGT | vm::VM_CHKINS | vm::VM_TT | vm::VM_TF | vm::VM_NF){
+    if matches!(
+        op,
+        vm::VM_CEQ
+            | vm::VM_CDEQ
+            | vm::VM_CLT
+            | vm::VM_CGT
+            | vm::VM_CHKINS
+            | vm::VM_TT
+            | vm::VM_TF
+            | vm::VM_NF
+    ) {
         let mut uses = Vec::new();
         match op {
             x if x == vm::VM_TT || x == vm::VM_TF => {
                 uses.push(r(0));
             }
-            x if x == vm::VM_CEQ || x == vm::VM_CDEQ || x == vm::VM_CLT || x == vm::VM_CGT || x == vm::VM_CHKINS => {
+            x if x == vm::VM_CEQ
+                || x == vm::VM_CDEQ
+                || x == vm::VM_CLT
+                || x == vm::VM_CGT
+                || x == vm::VM_CHKINS =>
+            {
                 uses.push(r(0));
                 uses.push(r(1));
             }
@@ -536,8 +577,18 @@ fn effects_of(op: i32, words: &[i32]) -> (Vec<Var>, Vec<Var>) {
         return (Vec::new(), vec![r(0)]);
     }
 
-    // RET / NOP / REGMEMBER / DEBUGGER / EXTRY / ENTRY: no register effects here.
-    if matches!(op, vm::VM_RET | vm::VM_NOP | vm::VM_REGMEMBER | vm::VM_DEBUGGER | vm::VM_EXTRY | vm::VM_ENTRY) {
+    // RET / JMP / NOP / REGMEMBER / DEBUGGER / EXTRY / ENTRY: no register effects here.
+    // VM_JMP carries a relative PC offset as its single operand, NOT a register.
+    if matches!(
+        op,
+        vm::VM_RET
+            | vm::VM_JMP
+            | vm::VM_NOP
+            | vm::VM_REGMEMBER
+            | vm::VM_DEBUGGER
+            | vm::VM_EXTRY
+            | vm::VM_ENTRY
+    ) {
         return (Vec::new(), Vec::new());
     }
 
@@ -581,7 +632,10 @@ fn effects_of(op: i32, words: &[i32]) -> (Vec<Var>, Vec<Var>) {
         let obj = ops.get(0).copied().unwrap_or(0);
         let key = ops.get(1).copied().unwrap_or(0);
         let val = ops.get(2).copied().unwrap_or(0);
-        return (Vec::new(), vec![Var::Reg(obj), Var::Reg(key), Var::Reg(val)]);
+        return (
+            Vec::new(),
+            vec![Var::Reg(obj), Var::Reg(key), Var::Reg(val)],
+        );
     }
 
     // DELD/DELI, TYPEOFD/TYPEOFI: affect object + key + dst (for typeof*)
@@ -634,30 +688,27 @@ fn effects_of(op: i32, words: &[i32]) -> (Vec<Var>, Vec<Var>) {
         uses.extend(call_arg_regs(argc, ops, 3));
         return (def_r0(dst), uses);
     }
+    // CALLD: dst := obj.*member(args)
+    // Format (ops): [dst, obj, member_data_idx, argc, arg0, arg1, ...]
     if op == vm::VM_CALLD {
         let dst = ops.get(0).copied().unwrap_or(0);
         let obj = ops.get(1).copied().unwrap_or(0);
-        let tmp = ops.get(3).copied().unwrap_or(0); // tmp func reg
-        let argc = ops.get(4).copied().unwrap_or(0);
-        let mut defs = Vec::new();
-        if dst != 0 { defs.push(Var::Reg(dst)); }
-        if tmp != 0 { defs.push(Var::Reg(tmp)); }
+        // ops[2] = member_data_idx (not a register)
+        let argc = ops.get(3).copied().unwrap_or(0);
         let mut uses = vec![Var::Reg(obj)];
-        uses.extend(call_arg_regs(argc, ops, 5));
-        return (defs, uses);
+        uses.extend(call_arg_regs(argc, ops, 4));
+        return (def_r0(dst), uses);
     }
+    // CALLI: dst := obj.%member(args)
+    // Format (ops): [dst, obj, member_reg, argc, arg0, arg1, ...]
     if op == vm::VM_CALLI {
         let dst = ops.get(0).copied().unwrap_or(0);
         let obj = ops.get(1).copied().unwrap_or(0);
         let member = ops.get(2).copied().unwrap_or(0);
-        let tmp = ops.get(3).copied().unwrap_or(0); // tmp func reg
-        let argc = ops.get(4).copied().unwrap_or(0);
-        let mut defs = Vec::new();
-        if dst != 0 { defs.push(Var::Reg(dst)); }
-        if tmp != 0 { defs.push(Var::Reg(tmp)); }
+        let argc = ops.get(3).copied().unwrap_or(0);
         let mut uses = vec![Var::Reg(obj), Var::Reg(member)];
-        uses.extend(call_arg_regs(argc, ops, 5));
-        return (defs, uses);
+        uses.extend(call_arg_regs(argc, ops, 4));
+        return (def_r0(dst), uses);
     }
 
     // Unary RMW operations (conservative default): op %r => r := f(r)
@@ -765,7 +816,11 @@ fn effects_op2_prop(ops: &[i32], op: i32) -> (Vec<Var>, Vec<Var>) {
             // op %a, %b  => a := f(a,b)
             let a = ops.get(0).copied().unwrap_or(0);
             let b = ops.get(1).copied().unwrap_or(0);
-            let defs = if a == 0 { Vec::new() } else { vec![Var::Reg(a)] };
+            let defs = if a == 0 {
+                Vec::new()
+            } else {
+                vec![Var::Reg(a)]
+            };
             (defs, vec![Var::Reg(a), Var::Reg(b)])
         }
         1 => {
@@ -773,7 +828,14 @@ fn effects_op2_prop(ops: &[i32], op: i32) -> (Vec<Var>, Vec<Var>) {
             let res = ops.get(0).copied().unwrap_or(0);
             let obj = ops.get(1).copied().unwrap_or(0);
             let rhs = ops.get(3).copied().unwrap_or(0);
-            (if res == 0 { Vec::new() } else { vec![Var::Reg(res)] }, vec![Var::Reg(obj), Var::Reg(rhs)])
+            (
+                if res == 0 {
+                    Vec::new()
+                } else {
+                    vec![Var::Reg(res)]
+                },
+                vec![Var::Reg(obj), Var::Reg(rhs)],
+            )
         }
         2 => {
             // oppi %res, %obj.%key, %rhs
@@ -781,14 +843,28 @@ fn effects_op2_prop(ops: &[i32], op: i32) -> (Vec<Var>, Vec<Var>) {
             let obj = ops.get(1).copied().unwrap_or(0);
             let key = ops.get(2).copied().unwrap_or(0);
             let rhs = ops.get(3).copied().unwrap_or(0);
-            (if res == 0 { Vec::new() } else { vec![Var::Reg(res)] }, vec![Var::Reg(obj), Var::Reg(key), Var::Reg(rhs)])
+            (
+                if res == 0 {
+                    Vec::new()
+                } else {
+                    vec![Var::Reg(res)]
+                },
+                vec![Var::Reg(obj), Var::Reg(key), Var::Reg(rhs)],
+            )
         }
         3 => {
             // opp %res, %obj, %rhs
             let res = ops.get(0).copied().unwrap_or(0);
             let obj = ops.get(1).copied().unwrap_or(0);
             let rhs = ops.get(2).copied().unwrap_or(0);
-            (if res == 0 { Vec::new() } else { vec![Var::Reg(res)] }, vec![Var::Reg(obj), Var::Reg(rhs)])
+            (
+                if res == 0 {
+                    Vec::new()
+                } else {
+                    vec![Var::Reg(res)]
+                },
+                vec![Var::Reg(obj), Var::Reg(rhs)],
+            )
         }
         _ => (Vec::new(), Vec::new()),
     }
@@ -812,20 +888,41 @@ fn effects_op1_prop(ops: &[i32], base: i32, op: i32, rmw: bool) -> (Vec<Var>, Ve
             // incpd %res, %obj.*data
             let res = ops.get(0).copied().unwrap_or(0);
             let obj = ops.get(1).copied().unwrap_or(0);
-            (if res == 0 { Vec::new() } else { vec![Var::Reg(res)] }, vec![Var::Reg(obj)])
+            (
+                if res == 0 {
+                    Vec::new()
+                } else {
+                    vec![Var::Reg(res)]
+                },
+                vec![Var::Reg(obj)],
+            )
         }
         2 => {
             // incpi %res, %obj.%key
             let res = ops.get(0).copied().unwrap_or(0);
             let obj = ops.get(1).copied().unwrap_or(0);
             let key = ops.get(2).copied().unwrap_or(0);
-            (if res == 0 { Vec::new() } else { vec![Var::Reg(res)] }, vec![Var::Reg(obj), Var::Reg(key)])
+            (
+                if res == 0 {
+                    Vec::new()
+                } else {
+                    vec![Var::Reg(res)]
+                },
+                vec![Var::Reg(obj), Var::Reg(key)],
+            )
         }
         3 => {
             // incp %res, %obj
             let res = ops.get(0).copied().unwrap_or(0);
             let obj = ops.get(1).copied().unwrap_or(0);
-            (if res == 0 { Vec::new() } else { vec![Var::Reg(res)] }, vec![Var::Reg(obj)])
+            (
+                if res == 0 {
+                    Vec::new()
+                } else {
+                    vec![Var::Reg(res)]
+                },
+                vec![Var::Reg(obj)],
+            )
         }
         _ => (Vec::new(), Vec::new()),
     }

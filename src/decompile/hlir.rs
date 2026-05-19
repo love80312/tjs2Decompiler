@@ -20,9 +20,19 @@ pub enum HExpr {
 
 #[derive(Debug, Clone)]
 pub enum HStmt {
-    Phi { result: VarId, args: Vec<(usize, VarId)> },
-    Let { defs: Vec<VarId>, expr: HExpr },
-    Opaque { defs: Vec<VarId>, op: &'static str, uses: Vec<VarId> },
+    Phi {
+        result: VarId,
+        args: Vec<(usize, VarId)>,
+    },
+    Let {
+        defs: Vec<VarId>,
+        expr: HExpr,
+    },
+    Opaque {
+        defs: Vec<VarId>,
+        op: &'static str,
+        uses: Vec<VarId>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -187,4 +197,3 @@ fn fmt_vid(v: VarId) -> String {
         Var::Exception => format!("exc#{}", v.ver),
     }
 }
-

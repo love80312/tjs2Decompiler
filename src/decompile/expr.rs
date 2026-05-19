@@ -275,29 +275,11 @@ impl Expr {
                 } else {
                     write!(f, "r{}", r)?
                 }
-            },
+            }
             Expr::Flag => write!(f, "flag")?,
             Expr::ConstData(i) => write!(f, "__d[{}]", i)?,
 
-            Expr::SsaVar(v) => {
-                // write!(f, "{}", fmt_var(*v))?
-                match v.var {
-                    Var::Reg(r) => {
-                        if r <= -3 {
-                            write!(f, "a{}", -3 - r)?
-                        } else if r == -2 {
-                            write!(f, "global")?
-                        } else if r == -1 {
-                            write!(f, "this")?
-                        } else {
-                            write!(f, "{}", fmt_var(*v))?
-                        }
-                    },
-                    _ => {
-                        write!(f, "{}", fmt_var(*v))?
-                    }
-                }
-            },
+            Expr::SsaVar(v) => write!(f, "{}", fmt_var(*v))?,
 
             Expr::Void => write!(f, "void")?,
             Expr::Null => write!(f, "null")?,
@@ -427,7 +409,17 @@ impl fmt::Display for Expr {
 
 fn fmt_vid_default(vid: VarId) -> String {
     match vid.var {
-        Var::Reg(r) => format!("r{}#{}", r, vid.ver),
+        Var::Reg(r) => {
+            if r <= -3 {
+                format!("a{}", -3 - r)
+            } else if r == -2 {
+                "global".to_string()
+            } else if r == -1 {
+                "this".to_string()
+            } else {
+                format!("r{}#{}", r, vid.ver)
+            }
+        }
         Var::Flag => format!("flag#{}", vid.ver),
         Var::Exception => format!("exc#{}", vid.ver),
     }

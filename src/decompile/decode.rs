@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 use crate::model::Tjs2Object;
 use crate::vmcodes::vm;
@@ -89,8 +89,10 @@ pub fn decode_one(code: &[i32], pc: usize) -> Result<Insn> {
         2
     } else if op == vm::VM_ENTRY {
         3
-    } else if matches!(op, vm::VM_RET | vm::VM_NOP | vm::VM_NF | vm::VM_EXTRY | vm::VM_REGMEMBER | vm::VM_DEBUGGER)
-    {
+    } else if matches!(
+        op,
+        vm::VM_RET | vm::VM_NOP | vm::VM_NF | vm::VM_EXTRY | vm::VM_REGMEMBER | vm::VM_DEBUGGER
+    ) {
         1
     } else if op == vm::VM_SETP || op == vm::VM_GETP {
         3
@@ -142,7 +144,12 @@ pub fn decode_one(code: &[i32], pc: usize) -> Result<Insn> {
     for j in 0..size {
         words.push(code[pc + j]);
     }
-    Ok(Insn { pc, op, size, words })
+    Ok(Insn {
+        pc,
+        op,
+        size,
+        words,
+    })
 }
 
 fn is_op2_prop(op: i32) -> bool {
@@ -231,5 +238,3 @@ fn ensure(code: &[i32], pc: usize, need: usize) -> Result<()> {
     }
     Ok(())
 }
-
-

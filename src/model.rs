@@ -38,25 +38,25 @@ pub struct Tjs2Object {
     pub prop_getter: i32,
     pub super_class_getter: i32,
 
-    pub code: Vec<i32>,                 // i16 words, sign-extended to i32
-    pub data: Vec<Variant>,             // vdata[]
-    pub scgetterps: Vec<i32>,           // unused for now
-    pub properties: Vec<(i32, i32)>,    // (name_string_index, object_index)
+    pub code: Vec<i32>,              // i16 words, sign-extended to i32
+    pub data: Vec<Variant>,          // vdata[]
+    pub scgetterps: Vec<i32>,        // unused for now
+    pub properties: Vec<(i32, i32)>, // (name_string_index, object_index)
 }
 
 #[derive(Debug, Clone)]
 pub enum Variant {
     Void,
-    NullObject,           // TYPE_OBJECT (krkrz uses this mainly for null closure in bytecode)
-    InterObject(i32),     // TYPE_INTER_OBJECT
-    InterGenerator(i32),  // TYPE_INTER_GENERATOR
-    String(i32),          // index into string pool
-    Octet(i32),           // index into octet pool
-    Real(i32),            // index into double pool
-    Byte(i32),            // index into byte pool
-    Short(i32),           // index into short pool
-    Integer(i32),         // index into int pool
-    Long(i32),            // index into long pool
+    NullObject,       // TYPE_OBJECT (krkrz uses this mainly for null closure in bytecode)
+    InterObject(i32), // TYPE_INTER_OBJECT
+    InterGenerator(i32), // TYPE_INTER_GENERATOR
+    String(i32),      // index into string pool
+    Octet(i32),       // index into octet pool
+    Real(i32),        // index into double pool
+    Byte(i32),        // index into byte pool
+    Short(i32),       // index into short pool
+    Integer(i32),     // index into int pool
+    Long(i32),        // index into long pool
     Unknown,
 }
 
@@ -68,7 +68,11 @@ impl Variant {
             Variant::InterObject(idx) => format!("#InterObject({})", idx),
             Variant::InterGenerator(idx) => format!("#InterGenerator({})", idx),
             Variant::String(i) => {
-                let s = pools.strings.get(i as usize).cloned().unwrap_or_else(|| "<bad-string-index>".to_string());
+                let s = pools
+                    .strings
+                    .get(i as usize)
+                    .cloned()
+                    .unwrap_or_else(|| "<bad-string-index>".to_string());
                 format!("#Var.String({})", fmt_quoted(&s))
             }
             Variant::Octet(i) => {

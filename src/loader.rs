@@ -1,12 +1,15 @@
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 
 use crate::model::{ConstPools, Tjs2File, Tjs2Object, Variant};
 
-const FILE_TAG_LE: u32 = ('T' as u32) | (('J' as u32) << 8) | (('S' as u32) << 16) | (('2' as u32) << 24);
+const FILE_TAG_LE: u32 =
+    ('T' as u32) | (('J' as u32) << 8) | (('S' as u32) << 16) | (('2' as u32) << 24);
 const VER_TAG_LE: u32 = ('1' as u32) | (('0' as u32) << 8) | (('0' as u32) << 16) | (0u32 << 24);
 
-const OBJ_TAG_LE: u32 = ('O' as u32) | (('B' as u32) << 8) | (('J' as u32) << 16) | (('S' as u32) << 24);
-const DATA_TAG_LE: u32 = ('D' as u32) | (('A' as u32) << 8) | (('T' as u32) << 16) | (('A' as u32) << 24);
+const OBJ_TAG_LE: u32 =
+    ('O' as u32) | (('B' as u32) << 8) | (('J' as u32) << 16) | (('S' as u32) << 24);
+const DATA_TAG_LE: u32 =
+    ('D' as u32) | (('A' as u32) << 8) | (('T' as u32) << 16) | (('A' as u32) << 24);
 
 // Variant types (krkrz tTJSByteCodeLoader)
 const TYPE_VOID: i16 = 0;
@@ -32,20 +35,36 @@ pub fn load_tjs2_bytecode(buf: &[u8]) -> Result<Tjs2File> {
     let file_tag = r.read_u32_le().context("read file tag")?;
     let ver_tag = r.read_u32_le().context("read version tag")?;
     if file_tag != FILE_TAG_LE {
-        bail!("fourcc mismatch: expect {:?}, got {:?}", b"TJS2", u32_to_4cc(file_tag));
+        bail!(
+            "fourcc mismatch: expect {:?}, got {:?}",
+            b"TJS2",
+            u32_to_4cc(file_tag)
+        );
     }
     if ver_tag != VER_TAG_LE {
-        bail!("version mismatch: expect {:?}, got {:?}", b"100\0", u32_to_4cc(ver_tag));
+        bail!(
+            "version mismatch: expect {:?}, got {:?}",
+            b"100\0",
+            u32_to_4cc(ver_tag)
+        );
     }
     let file_size = r.read_u32_le().context("read file size")? as usize;
     if file_size != buf.len() {
-        bail!("file size mismatch: header={}, actual={}", file_size, buf.len());
+        bail!(
+            "file size mismatch: header={}, actual={}",
+            file_size,
+            buf.len()
+        );
     }
 
     // DATA chunk: tag + chunk_size (includes tag+size) + payload
     let data_tag = r.read_u32_le().context("read DATA tag")?;
     if data_tag != DATA_TAG_LE {
-        bail!("fourcc mismatch: expect {:?}, got {:?}", b"DATA", u32_to_4cc(data_tag));
+        bail!(
+            "fourcc mismatch: expect {:?}, got {:?}",
+            b"DATA",
+            u32_to_4cc(data_tag)
+        );
     }
     let data_chunk_size = r.read_u32_le().context("read DATA chunk size")? as usize;
     if data_chunk_size < 8 {
@@ -53,9 +72,15 @@ pub fn load_tjs2_bytecode(buf: &[u8]) -> Result<Tjs2File> {
     }
     let data_payload_size = data_chunk_size - 8;
     let data_start = r.pos();
-    let data_end = data_start.checked_add(data_payload_size).ok_or_else(|| anyhow!("overflow computing DATA end"))?;
+    let data_end = data_start
+        .checked_add(data_payload_size)
+        .ok_or_else(|| anyhow!("overflow computing DATA end"))?;
     if data_end > buf.len() {
-        bail!("DATA payload out of range: end={}, file={}", data_end, buf.len());
+        bail!(
+            "DATA payload out of range: end={}, file={}",
+            data_end,
+            buf.len()
+        );
     }
     let pools = read_data_area(&buf[data_start..data_end]).context("parse DATA area")?;
     r.set_pos(data_end);
@@ -63,7 +88,11 @@ pub fn load_tjs2_bytecode(buf: &[u8]) -> Result<Tjs2File> {
     // OBJS chunk: tag + chunk_size (includes tag+size) + payload
     let objs_tag = r.read_u32_le().context("read OBJS tag")?;
     if objs_tag != OBJ_TAG_LE {
-        bail!("fourcc mismatch: expect {:?}, got {:?}", b"OBJS", u32_to_4cc(objs_tag));
+        bail!(
+            "fourcc mismatch: expect {:?}, got {:?}",
+            b"OBJS",
+            u32_to_4cc(objs_tag)
+        );
     }
     let objs_chunk_size = r.read_u32_le().context("read OBJS chunk size")? as usize;
     if objs_chunk_size < 8 {
@@ -71,20 +100,35 @@ pub fn load_tjs2_bytecode(buf: &[u8]) -> Result<Tjs2File> {
     }
     let objs_payload_size = objs_chunk_size - 8;
     let objs_start = r.pos();
-    let objs_end = objs_start.checked_add(objs_payload_size).ok_or_else(|| anyhow!("overflow computing OBJS end"))?;
+    let objs_end = objs_start
+        .checked_add(objs_payload_size)
+        .ok_or_else(|| anyhow!("overflow computing OBJS end"))?;
     if objs_end > buf.len() {
-        bail!("OBJS payload out of range: end={}, file={}", objs_end, buf.len());
+        bail!(
+            "OBJS payload out of range: end={}, file={}",
+            objs_end,
+            buf.len()
+        );
     }
 
-    let (toplevel, objects) = read_objects(&buf[objs_start..objs_end], &pools).context("parse OBJS area")?;
+    let (toplevel, objects) =
+        read_objects(&buf[objs_start..objs_end], &pools).context("parse OBJS area")?;
     r.set_pos(objs_end);
 
     // No extra trailing bytes are expected in krkrz's exporter.
     if r.pos() != buf.len() {
-        bail!("unexpected trailing bytes: pos={}, file={}", r.pos(), buf.len());
+        bail!(
+            "unexpected trailing bytes: pos={}, file={}",
+            r.pos(),
+            buf.len()
+        );
     }
 
-    Ok(Tjs2File { toplevel, const_pools: pools, objects })
+    Ok(Tjs2File {
+        toplevel,
+        const_pools: pools,
+        objects,
+    })
 }
 
 fn read_data_area(payload: &[u8]) -> Result<ConstPools> {
@@ -104,7 +148,9 @@ fn read_data_area(payload: &[u8]) -> Result<ConstPools> {
     if count > 0 {
         pools.shorts.reserve(count);
         for _ in 0..count {
-            pools.shorts.push(r.read_i16_le().context("DATA.shorts.elem")?);
+            pools
+                .shorts
+                .push(r.read_i16_le().context("DATA.shorts.elem")?);
         }
         if (count & 1) == 1 {
             // alignment
@@ -126,7 +172,9 @@ fn read_data_area(payload: &[u8]) -> Result<ConstPools> {
     if count > 0 {
         pools.longs.reserve(count);
         for _ in 0..count {
-            pools.longs.push(r.read_i64_le().context("DATA.longs.elem")?);
+            pools
+                .longs
+                .push(r.read_i64_le().context("DATA.longs.elem")?);
         }
     }
 
@@ -166,7 +214,11 @@ fn read_data_area(payload: &[u8]) -> Result<ConstPools> {
     }
 
     if r.pos() != payload.len() {
-        bail!("DATA: payload not fully consumed: pos={}, payload={}", r.pos(), payload.len());
+        bail!(
+            "DATA: payload not fully consumed: pos={}, payload={}",
+            r.pos(),
+            payload.len()
+        );
     }
 
     Ok(pools)
@@ -188,7 +240,11 @@ fn read_objects(payload: &[u8], pools: &ConstPools) -> Result<(i32, Vec<Tjs2Obje
     for o in 0..objcount {
         let tag = r.read_u32_le().context("OBJS.obj.tag")?;
         if tag != FILE_TAG_LE {
-            bail!("object fourcc mismatch: expect {:?}, got {:?}", b"TJS2", u32_to_4cc(tag));
+            bail!(
+                "object fourcc mismatch: expect {:?}, got {:?}",
+                b"TJS2",
+                u32_to_4cc(tag)
+            );
         }
         let _obj_payload_size = r.read_u32_le().context("OBJS.obj.size")? as usize;
 
@@ -199,7 +255,9 @@ fn read_objects(payload: &[u8], pools: &ConstPools) -> Result<(i32, Vec<Tjs2Obje
         let variable_reserve_count = r.read_i32_le().context("obj.variable_reserve_count")?;
         let max_frame_count = r.read_i32_le().context("obj.max_frame_count")?;
         let func_decl_arg_count = r.read_i32_le().context("obj.func_decl_arg_count")?;
-        let func_decl_unnamed_arg_array_base = r.read_i32_le().context("obj.func_decl_unnamed_arg_array_base")?;
+        let func_decl_unnamed_arg_array_base = r
+            .read_i32_le()
+            .context("obj.func_decl_unnamed_arg_array_base")?;
         let func_decl_collapse_base = r.read_i32_le().context("obj.func_decl_collapse_base")?;
         let prop_setter = r.read_i32_le().context("obj.prop_setter")?;
         let prop_getter = r.read_i32_le().context("obj.prop_getter")?;
@@ -317,14 +375,23 @@ fn read_objects(payload: &[u8], pools: &ConstPools) -> Result<(i32, Vec<Tjs2Obje
     }
 
     if r.pos() != payload.len() {
-        bail!("OBJS: payload not fully consumed: pos={}, payload={}", r.pos(), payload.len());
+        bail!(
+            "OBJS: payload not fully consumed: pos={}, payload={}",
+            r.pos(),
+            payload.len()
+        );
     }
 
     Ok((toplevel, objects))
 }
 
 fn u32_to_4cc(x: u32) -> [u8; 4] {
-    [(x & 0xff) as u8, ((x >> 8) & 0xff) as u8, ((x >> 16) & 0xff) as u8, ((x >> 24) & 0xff) as u8]
+    [
+        (x & 0xff) as u8,
+        ((x >> 8) & 0xff) as u8,
+        ((x >> 16) & 0xff) as u8,
+        ((x >> 24) & 0xff) as u8,
+    ]
 }
 
 struct Reader<'a> {
@@ -333,9 +400,15 @@ struct Reader<'a> {
 }
 
 impl<'a> Reader<'a> {
-    fn new(buf: &'a [u8]) -> Self { Self { buf, pos: 0 } }
-    fn pos(&self) -> usize { self.pos }
-    fn set_pos(&mut self, pos: usize) { self.pos = pos; }
+    fn new(buf: &'a [u8]) -> Self {
+        Self { buf, pos: 0 }
+    }
+    fn pos(&self) -> usize {
+        self.pos
+    }
+    fn set_pos(&mut self, pos: usize) {
+        self.pos = pos;
+    }
 
     fn read_bytes(&mut self, n: usize) -> Result<&'a [u8]> {
         let end = self.pos.checked_add(n).ok_or_else(|| anyhow!("overflow"))?;
@@ -351,19 +424,27 @@ impl<'a> Reader<'a> {
         let b = self.read_bytes(2)?;
         Ok(u16::from_le_bytes([b[0], b[1]]))
     }
-    fn read_i16_le(&mut self) -> Result<i16> { Ok(self.read_u16_le()? as i16) }
+    fn read_i16_le(&mut self) -> Result<i16> {
+        Ok(self.read_u16_le()? as i16)
+    }
 
     fn read_u32_le(&mut self) -> Result<u32> {
         let b = self.read_bytes(4)?;
         Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
     }
-    fn read_i32_le(&mut self) -> Result<i32> { Ok(self.read_u32_le()? as i32) }
+    fn read_i32_le(&mut self) -> Result<i32> {
+        Ok(self.read_u32_le()? as i32)
+    }
 
     fn read_u64_le(&mut self) -> Result<u64> {
         let b = self.read_bytes(8)?;
-        Ok(u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]))
+        Ok(u64::from_le_bytes([
+            b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+        ]))
     }
-    fn read_i64_le(&mut self) -> Result<i64> { Ok(self.read_u64_le()? as i64) }
+    fn read_i64_le(&mut self) -> Result<i64> {
+        Ok(self.read_u64_le()? as i64)
+    }
 
     fn align4(&mut self) -> Result<()> {
         let rem = self.pos & 3;

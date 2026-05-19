@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 use crate::model::{ConstPools, Tjs2File, Tjs2Object};
 use crate::vmcodes::vm;
@@ -26,7 +26,10 @@ fn format_object_header(obj: &Tjs2Object) -> String {
     let name = obj.name.as_deref().unwrap_or("<anonymous>");
     format!(
         "== object {}: name={} context_type={} parent={} ==",
-        obj.index, quote(name), obj.context_type, obj.parent
+        obj.index,
+        quote(name),
+        obj.context_type,
+        obj.parent
     )
 }
 
@@ -48,7 +51,12 @@ pub fn disassemble_object(obj: &Tjs2Object, pools: &ConstPools) -> Result<String
     Ok(out)
 }
 
-fn format_insn(code: &[i32], i: usize, obj: &Tjs2Object, pools: &ConstPools) -> Result<(String, String, usize)> {
+fn format_insn(
+    code: &[i32],
+    i: usize,
+    obj: &Tjs2Object,
+    pools: &ConstPools,
+) -> Result<(String, String, usize)> {
     let op = code[i];
     let mut msg = String::new();
     let mut com = String::new();
@@ -135,11 +143,7 @@ fn format_insn(code: &[i32], i: usize, obj: &Tjs2Object, pools: &ConstPools) -> 
     }
 
     // JF/JNF/JMP (one code operand)
-    for (base, name) in [
-        (vm::VM_JF, "jf"),
-        (vm::VM_JNF, "jnf"),
-        (vm::VM_JMP, "jmp"),
-    ] {
+    for (base, name) in [(vm::VM_JF, "jf"), (vm::VM_JNF, "jnf"), (vm::VM_JMP, "jmp")] {
         if op == base {
             ensure(code, i, 2)?;
             msg = format!("{} {:09}", name, target(code[i + 1]));
@@ -200,7 +204,13 @@ fn format_insn(code: &[i32], i: usize, obj: &Tjs2Object, pools: &ConstPools) -> 
     if op == vm::VM_DELI || op == vm::VM_TYPEOFI {
         ensure(code, i, 4)?;
         let n = if op == vm::VM_DELI { "deli" } else { "typeofi" };
-        msg = format!("{} %{}, %{}.%{}", n, reg(code[i + 1]), reg(code[i + 2]), reg(code[i + 3]));
+        msg = format!(
+            "{} %{}, %{}.%{}",
+            n,
+            reg(code[i + 1]),
+            reg(code[i + 2]),
+            reg(code[i + 3])
+        );
         size = 4;
         return Ok((msg, com, size));
     }
@@ -244,7 +254,13 @@ fn format_insn(code: &[i32], i: usize, obj: &Tjs2Object, pools: &ConstPools) -> 
     if op == vm::VM_GPI || op == vm::VM_GPIS {
         ensure(code, i, 4)?;
         let n = if op == vm::VM_GPI { "gpi" } else { "gpis" };
-        msg = format!("{} %{}, %{}.%{}", n, reg(code[i + 1]), reg(code[i + 2]), reg(code[i + 3]));
+        msg = format!(
+            "{} %{}, %{}.%{}",
+            n,
+            reg(code[i + 1]),
+            reg(code[i + 2]),
+            reg(code[i + 3])
+        );
         size = 4;
         return Ok((msg, com, size));
     }
@@ -257,7 +273,13 @@ fn format_insn(code: &[i32], i: usize, obj: &Tjs2Object, pools: &ConstPools) -> 
             x if x == vm::VM_SPIE => "spie",
             _ => "spis",
         };
-        msg = format!("{} %{}.%{}, %{}", n, reg(code[i + 1]), reg(code[i + 2]), reg(code[i + 3]));
+        msg = format!(
+            "{} %{}.%{}, %{}",
+            n,
+            reg(code[i + 1]),
+            reg(code[i + 2]),
+            reg(code[i + 3])
+        );
         size = 4;
         return Ok((msg, com, size));
     }
@@ -309,8 +331,14 @@ fn format_insn(code: &[i32], i: usize, obj: &Tjs2Object, pools: &ConstPools) -> 
     Ok((msg, com, 1))
 }
 
-fn op2_prop(code: &[i32], i: usize, obj: &Tjs2Object, pools: &ConstPools, base: i32, name: &str)
-    -> Result<Option<(String, String, usize)>> {
+fn op2_prop(
+    code: &[i32],
+    i: usize,
+    obj: &Tjs2Object,
+    pools: &ConstPools,
+    base: i32,
+    name: &str,
+) -> Result<Option<(String, String, usize)>> {
     let op = code[i];
     if op < base || op > base + 3 {
         return Ok(None);
@@ -318,7 +346,11 @@ fn op2_prop(code: &[i32], i: usize, obj: &Tjs2Object, pools: &ConstPools, base: 
     match op - base {
         0 => {
             ensure(code, i, 3)?;
-            Ok(Some((format!("{} %{}, %{}", name, code[i + 1], code[i + 2]), String::new(), 3)))
+            Ok(Some((
+                format!("{} %{}, %{}", name, code[i + 1], code[i + 2]),
+                String::new(),
+                3,
+            )))
         }
         1 => {
             ensure(code, i, 5)?;
@@ -330,22 +362,53 @@ fn op2_prop(code: &[i32], i: usize, obj: &Tjs2Object, pools: &ConstPools, base: 
             if let Some(v) = obj.data.get(c as usize) {
                 com = format!("*{} = {}", c, v.to_readable(pools));
             }
-            Ok(Some((format!("{}pd %{}, %{}.*{}, %{}", name, a, b, c, d), com, 5)))
+            Ok(Some((
+                format!("{}pd %{}, %{}.*{}, %{}", name, a, b, c, d),
+                com,
+                5,
+            )))
         }
         2 => {
             ensure(code, i, 5)?;
-            Ok(Some((format!("{}pi %{}, %{}.%{}, %{}", name, code[i + 1], code[i + 2], code[i + 3], code[i + 4]), String::new(), 5)))
+            Ok(Some((
+                format!(
+                    "{}pi %{}, %{}.%{}, %{}",
+                    name,
+                    code[i + 1],
+                    code[i + 2],
+                    code[i + 3],
+                    code[i + 4]
+                ),
+                String::new(),
+                5,
+            )))
         }
         3 => {
             ensure(code, i, 4)?;
-            Ok(Some((format!("{}p %{}, %{}, %{}", name, code[i + 1], code[i + 2], code[i + 3]), String::new(), 4)))
+            Ok(Some((
+                format!(
+                    "{}p %{}, %{}, %{}",
+                    name,
+                    code[i + 1],
+                    code[i + 2],
+                    code[i + 3]
+                ),
+                String::new(),
+                4,
+            )))
         }
         _ => Ok(None),
     }
 }
 
-fn op1_prop(code: &[i32], i: usize, obj: &Tjs2Object, pools: &ConstPools, base: i32, name: &str)
-    -> Result<Option<(String, String, usize)>> {
+fn op1_prop(
+    code: &[i32],
+    i: usize,
+    obj: &Tjs2Object,
+    pools: &ConstPools,
+    base: i32,
+    name: &str,
+) -> Result<Option<(String, String, usize)>> {
     let op = code[i];
     if op < base || op > base + 3 {
         return Ok(None);
@@ -353,7 +416,11 @@ fn op1_prop(code: &[i32], i: usize, obj: &Tjs2Object, pools: &ConstPools, base: 
     match op - base {
         0 => {
             ensure(code, i, 2)?;
-            Ok(Some((format!("{} %{}", name, code[i + 1]), String::new(), 2)))
+            Ok(Some((
+                format!("{} %{}", name, code[i + 1]),
+                String::new(),
+                2,
+            )))
         }
         1 => {
             ensure(code, i, 4)?;
@@ -368,17 +435,36 @@ fn op1_prop(code: &[i32], i: usize, obj: &Tjs2Object, pools: &ConstPools, base: 
         }
         2 => {
             ensure(code, i, 4)?;
-            Ok(Some((format!("{}pi %{}, %{}.%{}", name, code[i + 1], code[i + 2], code[i + 3]), String::new(), 4)))
+            Ok(Some((
+                format!(
+                    "{}pi %{}, %{}.%{}",
+                    name,
+                    code[i + 1],
+                    code[i + 2],
+                    code[i + 3]
+                ),
+                String::new(),
+                4,
+            )))
         }
         3 => {
             ensure(code, i, 3)?;
-            Ok(Some((format!("{}p %{}, %{}", name, code[i + 1], code[i + 2]), String::new(), 3)))
+            Ok(Some((
+                format!("{}p %{}, %{}", name, code[i + 1], code[i + 2]),
+                String::new(),
+                3,
+            )))
         }
         _ => Ok(None),
     }
 }
 
-fn format_call(code: &[i32], i: usize, obj: &Tjs2Object, pools: &ConstPools) -> Result<(String, String, usize)> {
+fn format_call(
+    code: &[i32],
+    i: usize,
+    obj: &Tjs2Object,
+    pools: &ConstPools,
+) -> Result<(String, String, usize)> {
     let op = code[i];
     // Base layout:
     // CALL:  op, dst, func, argc, [args...]
@@ -467,7 +553,12 @@ fn format_call(code: &[i32], i: usize, obj: &Tjs2Object, pools: &ConstPools) -> 
 
 fn ensure(code: &[i32], i: usize, need: usize) -> Result<()> {
     if i + need > code.len() {
-        bail!("truncated instruction at {}: need {}, code_len {}", i, need, code.len());
+        bail!(
+            "truncated instruction at {}: need {}, code_len {}",
+            i,
+            need,
+            code.len()
+        );
     }
     Ok(())
 }

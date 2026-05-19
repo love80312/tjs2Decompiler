@@ -164,7 +164,12 @@ fn emit_stmt(out: &mut String, st: &Stmt, fmt_var: &dyn Fn(VarId) -> String) -> 
                 value.to_tjs_with(fmt_var)
             )?;
         }
-        Stmt::Update { dst, target, op, rhs } => {
+        Stmt::Update {
+            dst,
+            target,
+            op,
+            rhs,
+        } => {
             // Evaluate once to avoid re-evaluating target if it's not trivial.
             // This is still a static lowering; if you want stricter "no temp" policy, tell me.
             let tmp = "__tjs2dec_u";
@@ -220,7 +225,11 @@ fn emit_terminator(
             writeln!(out, "        __bb = {};", t)?;
             writeln!(out, "        continue;")?;
         }
-        Terminator::Br { cond, if_true, if_false } => {
+        Terminator::Br {
+            cond,
+            if_true,
+            if_false,
+        } => {
             writeln!(out, "        if ({}) {{", cond.to_tjs_with(fmt_var))?;
             emit_phi_parallel_copies(out, fmt_var, phi_moves, b.id, *if_true, "          ")?;
             writeln!(out, "          __bb = {};", if_true)?;
@@ -257,7 +266,13 @@ fn exceptional_succ(b: &ExprBlock) -> Option<usize> {
     let normal = match b.term {
         Terminator::Jmp(_) => 1,
         Terminator::Br { .. } => 2,
-        Terminator::Fallthrough => if b.succ.is_empty() { 0 } else { 1 },
+        Terminator::Fallthrough => {
+            if b.succ.is_empty() {
+                0
+            } else {
+                1
+            }
+        }
         Terminator::Ret | Terminator::Throw(_) | Terminator::Exit => 0,
     };
     if b.succ.len() > normal {
@@ -290,7 +305,9 @@ fn emit_phi_parallel_copies(
     succ: usize,
     indent: &str,
 ) -> Result<()> {
-    let Some(moves) = phi_moves.get(&(pred, succ)) else { return Ok(()); };
+    let Some(moves) = phi_moves.get(&(pred, succ)) else {
+        return Ok(());
+    };
 
     // Filter identity moves
     let mut mv: Vec<(VarId, VarId)> = moves.iter().copied().filter(|(d, s)| d != s).collect();
@@ -344,7 +361,9 @@ fn collect_all_vars(prog: &ExprProgram) -> Vec<String> {
                     collect_expr_vars(target, &mut set);
                     collect_expr_vars(value, &mut set);
                 }
-                Stmt::Update { dst, target, rhs, .. } => {
+                Stmt::Update {
+                    dst, target, rhs, ..
+                } => {
                     if let Some(d) = dst {
                         set.insert(*d);
                     }

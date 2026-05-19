@@ -1,15 +1,21 @@
 use anyhow::Result;
 
 use crate::model::{ConstPools, Tjs2File, Tjs2Object, Variant};
-use crate::vmcodes::vm as vm;
+use crate::vmcodes::vm;
 
 use super::expr::{BinOp, Expr, UnOp};
 use super::ssa::{Phi, SsaBlock, SsaInsn, SsaProgram, Var, VarId};
 
 #[derive(Debug, Clone)]
 pub enum Stmt {
-    Assign { dst: VarId, expr: Expr },
-    Store { target: Expr, value: Expr },
+    Assign {
+        dst: VarId,
+        expr: Expr,
+    },
+    Store {
+        target: Expr,
+        value: Expr,
+    },
     /// Read-modify-write update: target = target (op) rhs; optionally write the value into dst.
     Update {
         dst: Option<VarId>,
@@ -18,7 +24,11 @@ pub enum Stmt {
         rhs: Expr,
     },
     Expr(Expr),
-    Opaque { op: &'static str, args: Vec<Expr>, defs: Vec<VarId> },
+    Opaque {
+        op: &'static str,
+        args: Vec<Expr>,
+        defs: Vec<VarId>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -76,7 +86,9 @@ impl ExprProgram {
             for p in &b.phi {
                 out.push_str(&format!("  {} = phi [", fmt_vid(p.result)));
                 for (i, (pred, v)) in p.args.iter().enumerate() {
-                    if i != 0 { out.push_str(", "); }
+                    if i != 0 {
+                        out.push_str(", ");
+                    }
                     out.push_str(&format!("bb{}: {}", pred, fmt_vid(*v)));
                 }
                 out.push_str("]\n");
@@ -89,12 +101,30 @@ impl ExprProgram {
                     Stmt::Store { target, value } => {
                         out.push_str(&format!("  {} = {};\n", target, value));
                     }
-                    Stmt::Update { dst, target, op, rhs } => {
+                    Stmt::Update {
+                        dst,
+                        target,
+                        op,
+                        rhs,
+                    } => {
                         if let Some(d) = dst {
-                            out.push_str(&format!("  {} = ({} {} {}); {} = {};\n",
-                                fmt_vid(*d), target, op.op_str(), rhs, target, fmt_vid(*d)));
+                            out.push_str(&format!(
+                                "  {} = ({} {} {}); {} = {};\n",
+                                fmt_vid(*d),
+                                target,
+                                op.op_str(),
+                                rhs,
+                                target,
+                                fmt_vid(*d)
+                            ));
                         } else {
-                            out.push_str(&format!("  {} = ({} {} {});\n", target, target, op.op_str(), rhs));
+                            out.push_str(&format!(
+                                "  {} = ({} {} {});\n",
+                                target,
+                                target,
+                                op.op_str(),
+                                rhs
+                            ));
                         }
                     }
                     Stmt::Expr(e) => out.push_str(&format!("  {};\n", e)),
@@ -102,7 +132,9 @@ impl ExprProgram {
                         if !defs.is_empty() {
                             out.push_str("  ");
                             for (i, d) in defs.iter().enumerate() {
-                                if i != 0 { out.push_str(", "); }
+                                if i != 0 {
+                                    out.push_str(", ");
+                                }
                                 out.push_str(&fmt_vid(*d));
                             }
                             out.push_str(" = ");
@@ -113,7 +145,9 @@ impl ExprProgram {
                         if !args.is_empty() {
                             out.push('(');
                             for (i, a) in args.iter().enumerate() {
-                                if i != 0 { out.push_str(", "); }
+                                if i != 0 {
+                                    out.push_str(", ");
+                                }
                                 out.push_str(&a.to_string());
                             }
                             out.push(')');
@@ -166,18 +200,32 @@ fn derive_terminator(b: &SsaBlock, last: Option<&SsaInsn>) -> Terminator {
         vm::VM_JF | vm::VM_JNF => {
             let tgt = b.succ.get(0).copied().unwrap_or(b.id);
             let fall = b.succ.get(1).copied().unwrap_or(b.id);
-            let flag = insn.uses.get(0).copied().map(Expr::SsaVar).unwrap_or(Expr::Flag);
+            let flag = insn
+                .uses
+                .get(0)
+                .copied()
+                .map(Expr::SsaVar)
+                .unwrap_or(Expr::Flag);
             // JF: jump if !flag ; JNF: jump if flag
             let cond = if insn.op == vm::VM_JF {
                 Expr::Unary(UnOp::Not, Box::new(flag))
             } else {
                 flag
             };
-            Terminator::Br { cond, if_true: tgt, if_false: fall }
+            Terminator::Br {
+                cond,
+                if_true: tgt,
+                if_false: fall,
+            }
         }
         vm::VM_RET => Terminator::Ret,
         vm::VM_THROW => {
-            let e = insn.uses.get(0).copied().map(Expr::SsaVar).unwrap_or(Expr::Opaque("throw".into(), vec![]));
+            let e = insn
+                .uses
+                .get(0)
+                .copied()
+                .map(Expr::SsaVar)
+                .unwrap_or(Expr::Opaque("throw".into(), vec![]));
             Terminator::Throw(e)
         }
         vm::VM_EXTRY => Terminator::Exit,
@@ -195,7 +243,11 @@ fn lower_insn(file: &Tjs2File, obj: &Tjs2Object, insn: &SsaInsn, out: &mut Vec<S
             if let (Some(dst), Some(src)) = (def0(), use_e(0)) {
                 out.push(Stmt::Assign { dst, expr: src });
             } else {
-                out.push(Stmt::Opaque { op: insn.mnemonic, args: vec![], defs: insn.defs.clone() });
+                out.push(Stmt::Opaque {
+                    op: insn.mnemonic,
+                    args: vec![],
+                    defs: insn.defs.clone(),
+                });
             }
         }
 
@@ -203,37 +255,55 @@ fn lower_insn(file: &Tjs2File, obj: &Tjs2Object, insn: &SsaInsn, out: &mut Vec<S
             // raw_ops: [dst_reg, data_idx]
             if let Some(dst) = def0() {
                 let data_idx = insn.raw_ops.get(1).copied().unwrap_or(0);
-                out.push(Stmt::Assign { dst, expr: data_to_expr(file, obj, data_idx) });
+                out.push(Stmt::Assign {
+                    dst,
+                    expr: data_to_expr(file, obj, data_idx),
+                });
             }
         }
 
         vm::VM_CL => {
             if let Some(dst) = def0() {
-                out.push(Stmt::Assign { dst, expr: Expr::Void });
+                out.push(Stmt::Assign {
+                    dst,
+                    expr: Expr::Void,
+                });
             }
         }
 
         vm::VM_CCL => {
             // multiple defs: clear to void
             for d in &insn.defs {
-                out.push(Stmt::Assign { dst: *d, expr: Expr::Void });
+                out.push(Stmt::Assign {
+                    dst: *d,
+                    expr: Expr::Void,
+                });
             }
         }
 
         vm::VM_GLOBAL => {
             if let Some(dst) = def0() {
-                out.push(Stmt::Assign { dst, expr: Expr::Opaque("global".into(), vec![]) });
+                out.push(Stmt::Assign {
+                    dst,
+                    expr: Expr::Opaque("global".into(), vec![]),
+                });
             }
         }
 
         vm::VM_SETF => {
             if let Some(dst) = def0() {
-                out.push(Stmt::Assign { dst, expr: Expr::Bool(true) });
+                out.push(Stmt::Assign {
+                    dst,
+                    expr: Expr::Bool(true),
+                });
             }
         }
         vm::VM_SETNF => {
             if let Some(dst) = def0() {
-                out.push(Stmt::Assign { dst, expr: Expr::Bool(false) });
+                out.push(Stmt::Assign {
+                    dst,
+                    expr: Expr::Bool(false),
+                });
             }
         }
 
@@ -250,7 +320,10 @@ fn lower_insn(file: &Tjs2File, obj: &Tjs2Object, insn: &SsaInsn, out: &mut Vec<S
                     vm::VM_CHKINS => BinOp::In,
                     _ => BinOp::Eq,
                 };
-                out.push(Stmt::Assign { dst, expr: Expr::Binary(op, Box::new(a), Box::new(b)) });
+                out.push(Stmt::Assign {
+                    dst,
+                    expr: Expr::Binary(op, Box::new(a), Box::new(b)),
+                });
             }
         }
         vm::VM_TT => {
@@ -264,13 +337,19 @@ fn lower_insn(file: &Tjs2File, obj: &Tjs2Object, insn: &SsaInsn, out: &mut Vec<S
         vm::VM_TF => {
             if let Some(dst) = def0() {
                 let a = use_e(0).unwrap_or(Expr::Opaque("a".into(), vec![]));
-                out.push(Stmt::Assign { dst, expr: Expr::Unary(UnOp::Not, Box::new(a)) });
+                out.push(Stmt::Assign {
+                    dst,
+                    expr: Expr::Unary(UnOp::Not, Box::new(a)),
+                });
             }
         }
         vm::VM_NF => {
             if let Some(dst) = def0() {
                 let a = use_e(0).unwrap_or(Expr::Opaque("flag".into(), vec![]));
-                out.push(Stmt::Assign { dst, expr: Expr::Unary(UnOp::Not, Box::new(a)) });
+                out.push(Stmt::Assign {
+                    dst,
+                    expr: Expr::Unary(UnOp::Not, Box::new(a)),
+                });
             }
         }
 
@@ -295,7 +374,10 @@ fn lower_insn(file: &Tjs2File, obj: &Tjs2Object, insn: &SsaInsn, out: &mut Vec<S
         vm::VM_GETP => {
             if let Some(dst) = def0() {
                 let prop = use_e(0).unwrap_or(Expr::Opaque("prop".into(), vec![]));
-                out.push(Stmt::Assign { dst, expr: Expr::Deref(Box::new(prop)) });
+                out.push(Stmt::Assign {
+                    dst,
+                    expr: Expr::Deref(Box::new(prop)),
+                });
             }
         }
 
@@ -306,26 +388,40 @@ fn lower_insn(file: &Tjs2File, obj: &Tjs2Object, insn: &SsaInsn, out: &mut Vec<S
             let data_idx = insn.raw_ops.get(1).copied().unwrap_or(0);
             let key_e = data_to_expr(file, obj, data_idx);
             let target = prop_lvalue(obj_e, key_e);
-            out.push(Stmt::Store { target, value: val_e });
+            out.push(Stmt::Store {
+                target,
+                value: val_e,
+            });
         }
         vm::VM_SPI | vm::VM_SPIE | vm::VM_SPIS => {
             let obj_e = use_e(0).unwrap_or(Expr::Opaque("obj".into(), vec![]));
             let key_e = use_e(1).unwrap_or(Expr::Opaque("key".into(), vec![]));
             let val_e = use_e(2).unwrap_or(Expr::Opaque("val".into(), vec![]));
             let target = Expr::Index(Box::new(obj_e), Box::new(key_e));
-            out.push(Stmt::Store { target, value: val_e });
+            out.push(Stmt::Store {
+                target,
+                value: val_e,
+            });
         }
         vm::VM_SETP => {
             let prop = use_e(0).unwrap_or(Expr::Opaque("prop".into(), vec![]));
             let val = use_e(1).unwrap_or(Expr::Opaque("val".into(), vec![]));
-            out.push(Stmt::Store { target: Expr::Deref(Box::new(prop)), value: val });
+            out.push(Stmt::Store {
+                target: Expr::Deref(Box::new(prop)),
+                value: val,
+            });
         }
 
         // Calls
         vm::VM_CALL => {
             let dst = def0();
             let func = use_e(0).unwrap_or(Expr::Opaque("func".into(), vec![]));
-            let args = insn.uses.iter().skip(1).map(|v| Expr::SsaVar(*v)).collect::<Vec<_>>();
+            let args = insn
+                .uses
+                .iter()
+                .skip(1)
+                .map(|v| Expr::SsaVar(*v))
+                .collect::<Vec<_>>();
             let call = Expr::Call(Box::new(func), args);
             if let Some(d) = dst {
                 out.push(Stmt::Assign { dst: d, expr: call });
@@ -336,7 +432,12 @@ fn lower_insn(file: &Tjs2File, obj: &Tjs2Object, insn: &SsaInsn, out: &mut Vec<S
         vm::VM_NEW => {
             let dst = def0();
             let ctor = use_e(0).unwrap_or(Expr::Opaque("ctor".into(), vec![]));
-            let args = insn.uses.iter().skip(1).map(|v| Expr::SsaVar(*v)).collect::<Vec<_>>();
+            let args = insn
+                .uses
+                .iter()
+                .skip(1)
+                .map(|v| Expr::SsaVar(*v))
+                .collect::<Vec<_>>();
             let e = Expr::New(Box::new(ctor), args);
             if let Some(d) = dst {
                 out.push(Stmt::Assign { dst: d, expr: e });
@@ -349,7 +450,12 @@ fn lower_insn(file: &Tjs2File, obj: &Tjs2Object, insn: &SsaInsn, out: &mut Vec<S
             let obj_e = use_e(0).unwrap_or(Expr::Opaque("obj".into(), vec![]));
             let data_idx = insn.raw_ops.get(2).copied().unwrap_or(0);
             let key_e = data_to_expr(file, obj, data_idx);
-            let args = insn.uses.iter().skip(1).map(|v| Expr::SsaVar(*v)).collect::<Vec<_>>();
+            let args = insn
+                .uses
+                .iter()
+                .skip(1)
+                .map(|v| Expr::SsaVar(*v))
+                .collect::<Vec<_>>();
             let call = method_call_or_index_call(obj_e, key_e, args);
             if let Some(d) = dst {
                 out.push(Stmt::Assign { dst: d, expr: call });
@@ -361,7 +467,12 @@ fn lower_insn(file: &Tjs2File, obj: &Tjs2Object, insn: &SsaInsn, out: &mut Vec<S
             let dst = def0();
             let obj_e = use_e(0).unwrap_or(Expr::Opaque("obj".into(), vec![]));
             let key_e = use_e(1).unwrap_or(Expr::Opaque("key".into(), vec![]));
-            let args = insn.uses.iter().skip(2).map(|v| Expr::SsaVar(*v)).collect::<Vec<_>>();
+            let args = insn
+                .uses
+                .iter()
+                .skip(2)
+                .map(|v| Expr::SsaVar(*v))
+                .collect::<Vec<_>>();
             let func = Expr::Index(Box::new(obj_e), Box::new(key_e));
             let call = Expr::Call(Box::new(func), args);
             if let Some(d) = dst {
@@ -373,8 +484,16 @@ fn lower_insn(file: &Tjs2File, obj: &Tjs2Object, insn: &SsaInsn, out: &mut Vec<S
 
         // Fallback: represent as opaque op(defs, uses)
         _ => {
-            let args = insn.uses.iter().map(|v| Expr::SsaVar(*v)).collect::<Vec<_>>();
-            out.push(Stmt::Opaque { op: insn.mnemonic, args, defs: insn.defs.clone() });
+            let args = insn
+                .uses
+                .iter()
+                .map(|v| Expr::SsaVar(*v))
+                .collect::<Vec<_>>();
+            out.push(Stmt::Opaque {
+                op: insn.mnemonic,
+                args,
+                defs: insn.defs.clone(),
+            });
         }
     }
 }
@@ -419,7 +538,11 @@ fn prop_lvalue(obj: Expr, key: Expr) -> Expr {
 fn method_call_or_index_call(base: Expr, key: Expr, args: Vec<Expr>) -> Expr {
     if let Expr::Str(s) = &key {
         if is_ident_ascii(s) {
-            return Expr::MethodCall { base: Box::new(base), member: s.clone(), args };
+            return Expr::MethodCall {
+                base: Box::new(base),
+                member: s.clone(),
+                args,
+            };
         }
     }
     let f = Expr::Index(Box::new(base), Box::new(key));
@@ -428,9 +551,13 @@ fn method_call_or_index_call(base: Expr, key: Expr, args: Vec<Expr>) -> Expr {
 
 pub fn is_ident_ascii(s: &str) -> bool {
     let mut it = s.chars();
-    let Some(first) = it.next() else { return false; };
+    let Some(first) = it.next() else {
+        return false;
+    };
     let ok_first = first == '_' || first.is_ascii_alphabetic();
-    if !ok_first { return false; }
+    if !ok_first {
+        return false;
+    }
     it.all(|c| c == '_' || c.is_ascii_alphanumeric())
 }
 
@@ -445,7 +572,11 @@ fn fmt_vid(v: VarId) -> String {
 fn fmt_term(t: &Terminator) -> String {
     match t {
         Terminator::Jmp(b) => format!("jmp bb{}", b),
-        Terminator::Br { cond, if_true, if_false } => format!("br ({}) ? bb{} : bb{}", cond, if_true, if_false),
+        Terminator::Br {
+            cond,
+            if_true,
+            if_false,
+        } => format!("br ({}) ? bb{} : bb{}", cond, if_true, if_false),
         Terminator::Ret => "ret".into(),
         Terminator::Throw(e) => format!("throw {}", e),
         Terminator::Exit => "exit".into(),

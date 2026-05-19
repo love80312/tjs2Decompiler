@@ -1,5 +1,5 @@
-pub mod disasm;
 pub mod decompile;
+pub mod disasm;
 pub mod emit_exec_tjs;
 pub mod loader;
 pub mod model;
