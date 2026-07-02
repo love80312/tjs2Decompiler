@@ -1,0 +1,33 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*' # 當你推送類似 v0.4.0 的 tag 時會自動觸發
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Rust toolchain (Supports Edition 2024)
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        toolchain: stable # 確保使用最新的 stable 版本以支援 2024 edition
+
+    - name: Build release binary
+      run: cargo build --release
+
+    - name: Archive production artifacts
+      run: |
+        powershell Compress-Archive -Path target\release\tjs2dec.exe -DestinationPath tjs2dec-windows.zip
+
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        files: tjs2dec-windows.zip
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
