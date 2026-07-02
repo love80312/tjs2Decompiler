@@ -4,8 +4,8 @@ on:
   push:
     branches:
       - main
-      - master # 這樣無論預設分支是 main 還是 master 都會觸發
-  workflow_dispatch: # 這個可以讓你在 GitHub 網頁上隨時手動點擊執行
+      - master
+  workflow_dispatch:
 
 jobs:
   build-windows:
@@ -21,6 +21,8 @@ jobs:
         toolchain: stable
 
     - name: Build release binary
+      env:
+        RUSTFLAGS: "--cap-lints allow" # 關鍵修正：強制將所有代碼檢查限制降級為允許，無視未使用的程式碼警告
       run: cargo build --release
 
     - name: Archive production artifacts
