@@ -1,9 +1,11 @@
-name: Build and Release
+name: Build and Archive
 
 on:
   push:
-    tags:
-      - 'v*' # 當你推送類似 v0.4.0 的 tag 時會自動觸發
+    branches:
+      - main
+      - master # 這樣無論預設分支是 main 還是 master 都會觸發
+  workflow_dispatch: # 這個可以讓你在 GitHub 網頁上隨時手動點擊執行
 
 jobs:
   build-windows:
@@ -16,7 +18,7 @@ jobs:
     - name: Setup Rust toolchain (Supports Edition 2024)
       uses: actions-rust-lang/setup-rust-toolchain@v1
       with:
-        toolchain: stable # 確保使用最新的 stable 版本以支援 2024 edition
+        toolchain: stable
 
     - name: Build release binary
       run: cargo build --release
@@ -25,9 +27,8 @@ jobs:
       run: |
         powershell Compress-Archive -Path target\release\tjs2dec.exe -DestinationPath tjs2dec-windows.zip
 
-    - name: Create GitHub Release
-      uses: softprops/action-gh-release@v2
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
       with:
-        files: tjs2dec-windows.zip
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        name: tjs2dec-windows-binary
+        path: tjs2dec-windows.zip
